@@ -31,6 +31,10 @@ return {
             title = "Immich import configuration",
             file = "ImportConfiguration.lua",
         },
+        {
+            title = "Sync & Clean Deletions",
+            file = "SyncDeletionsDialog.lua",
+        },
     },
 
     LrExportMenuItems = {
@@ -41,6 +45,10 @@ return {
         {
             title = "Immich import configuration",
             file = "ImportConfiguration.lua",
+        },
+        {
+            title = "Sync & Clean Deletions",
+            file = "SyncDeletionsDialog.lua",
         },
     },
 

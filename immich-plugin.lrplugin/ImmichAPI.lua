@@ -212,6 +212,7 @@ function ImmichAPI:getAlbumAssets(albumId)
         table.insert(assets, {
             id = asset.id,
             originalFileName = asset.originalFileName,
+            deviceAssetId = asset.deviceAssetId,
         })
     end
 
