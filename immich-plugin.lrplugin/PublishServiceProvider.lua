@@ -19,6 +19,8 @@ return {
         { key = "stackOriginalExport", default = false },
         { key = "stackLrStacks", default = false },
         { key = "lockedFolderMode", default = "none" },
+        { key = "enableBatching", default = false },
+        { key = "batchSize", default = 100 },
     },
 
     small_icon = "icons/logo_small.png",

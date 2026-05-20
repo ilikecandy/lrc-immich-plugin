@@ -124,6 +124,67 @@ function SharedDialogSections.getLockedFolderSection(f, propertyTable)
     }
 end
 
+-- Generate the Shared 'Batch Export & Upload' dialog section
+function SharedDialogSections.getBatchingSection(f, propertyTable)
+    local bind = LrView.bind
+    local share = LrView.share
+
+    return {
+        title = "Batch Export & Upload Options",
+        bind_to_object = propertyTable,
+        f:column({
+            spacing = f:control_spacing(),
+            f:row({
+                margin_bottom = 5,
+                f:static_text({
+                    title = "For large collections, batching exports and uploads in smaller groups"
+                        .. "\nprevents disk space exhaustion and preserves progress if interrupted.",
+                    alignment = "left",
+                    font = "<system/small>",
+                }),
+            }),
+            f:row({
+                f:static_text({
+                    title = "Batching:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:checkbox({
+                    title = "Enable batching",
+                    value = bind("enableBatching"),
+                }),
+            }),
+            f:row({
+                f:static_text({
+                    title = "Batch size:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:edit_field({
+                    value = bind("batchSize"),
+                    enabled = bind("enableBatching"),
+                    width_in_chars = 6,
+                    precision = 0,
+                    min = 1,
+                    max = 10000,
+                    validate = function(_, val)
+                        local num = tonumber(val)
+                        if not num or num < 1 then
+                            return false, 100, "Batch size must be a positive integer."
+                        end
+                        return true, math.floor(num)
+                    end,
+                }),
+                f:static_text({
+                    title = "photos per batch",
+                    font = "<system/small>",
+                }),
+            }),
+        }),
+    }
+end
+
+
 -- Generate the Shared 'Immich Server connection' dialog section
 function SharedDialogSections.getServerConnectionSection(f, propertyTable)
     local bind = LrView.bind
