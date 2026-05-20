@@ -259,6 +259,28 @@ local function processPublishSingleRenditionRenditions(
     albumAssetIds,
     visibility
 )
+    -- Build O(1) cache of existing album assets in a single network request to eliminate sequential check latency!
+    local albumAssetsCache = nil
+    if albumId and albumId ~= "" then
+        log:info("processPublishSingleRenditionRenditions: Pre-fetching album assets for cache...")
+        local assets = immich:getAlbumAssets(albumId)
+        if assets then
+            albumAssetsCache = {
+                ids = {},
+                deviceIds = {}
+            }
+            for _, asset in ipairs(assets) do
+                if asset.id then
+                    albumAssetsCache.ids[asset.id] = true
+                end
+                if asset.deviceAssetId then
+                    albumAssetsCache.deviceIds[asset.deviceAssetId] = asset.id
+                end
+            end
+            log:info("processPublishSingleRenditionRenditions: Pre-fetched " .. #assets .. " assets into memory cache.")
+        end
+    end
+
     local failures, stackWarnings = {}, {}
     local atLeastSomeSuccess = false
     local exportedPrimaryByPhoto = {}
@@ -275,7 +297,8 @@ local function processPublishSingleRenditionRenditions(
                 photo,
                 deviceAssetId,
                 photo:getFormattedMetadata("fileName"),
-                photo:getFormattedMetadata("dateCreated")
+                photo:getFormattedMetadata("dateCreated"),
+                albumAssetsCache
             )
             local id, errReason
             if existingId == nil then
