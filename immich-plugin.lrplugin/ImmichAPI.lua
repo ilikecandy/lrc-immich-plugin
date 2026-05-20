@@ -212,6 +212,7 @@ function ImmichAPI:getAlbumAssets(albumId)
         table.insert(assets, {
             id = asset.id,
             originalFileName = asset.originalFileName,
+            deviceAssetId = asset.deviceAssetId,
         })
     end
 
@@ -841,8 +842,30 @@ end
 -- Returns assetId, deviceAssetId if found, nil otherwise
 -- Backward compatible: also searches by localIdentifier so existing installations
 -- (uploaded with localIdentifier) are found
-function ImmichAPI:checkIfAssetExistsEnhanced(photo, deviceAssetId, filename, dateCreated)
+function ImmichAPI:checkIfAssetExistsEnhanced(photo, deviceAssetId, filename, dateCreated, cache)
     require("MetadataTask")
+
+    -- Step 0: Check pre-fetched cache first (blazing fast O(1), no network calls!)
+    if cache then
+        local storedAssetId = MetadataTask.getImmichAssetId(photo)
+        if storedAssetId and storedAssetId ~= "" and cache.ids and cache.ids[storedAssetId] then
+            log:trace("checkIfAssetExistsEnhanced: Found assetId in pre-fetched cache: " .. storedAssetId)
+            return storedAssetId, deviceAssetId
+        end
+        if deviceAssetId and cache.deviceIds and cache.deviceIds[deviceAssetId] then
+            local foundId = cache.deviceIds[deviceAssetId]
+            log:trace("checkIfAssetExistsEnhanced: Found deviceAssetId in pre-fetched cache: " .. deviceAssetId)
+            MetadataTask.setImmichAssetId(photo, foundId)
+            return foundId, deviceAssetId
+        end
+        local localId = (photo and photo.localIdentifier) and tostring(photo.localIdentifier) or nil
+        if localId and cache.deviceIds and cache.deviceIds[localId] then
+            local foundId = cache.deviceIds[localId]
+            log:trace("checkIfAssetExistsEnhanced: Found legacy localIdentifier in pre-fetched cache: " .. localId)
+            MetadataTask.setImmichAssetId(photo, foundId)
+            return foundId, localId
+        end
+    end
 
     -- Step 1: Check metadata extension first (fastest, most reliable)
     local storedAssetId = MetadataTask.getImmichAssetId(photo)
