@@ -388,69 +388,55 @@ local function runPublishExport(
     albumAssetIds,
     visibility
 )
-    local renditions = {}
-    local queuedPhotosMap = {}
-    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
-        table.insert(renditions, rendition)
-        queuedPhotosMap[rendition.photo.localIdentifier] = rendition
-    end
-
     -- Determine if we should only publish the selected photos via a modal prompt
+    -- We do this BEFORE driving the slow iterator so it is instant!
     local selectedPhotosMap = nil
+    local cancelAll = false
+
     local LrApplication = import 'LrApplication'
     local catalog = LrApplication.activeCatalog()
     local selectedPhotos = catalog:getTargetPhotos()
     
-    local selectedQueuedPhotos = {}
-    if selectedPhotos and #selectedPhotos > 0 then
-        for _, photo in ipairs(selectedPhotos) do
-            if queuedPhotosMap[photo.localIdentifier] then
-                table.insert(selectedQueuedPhotos, photo)
-            end
-        end
-    end
-
-    if #selectedQueuedPhotos > 0 and #selectedQueuedPhotos < #renditions then
+    if selectedPhotos and #selectedPhotos > 0 and #selectedPhotos < nPhotos then
         local LrDialogs = import 'LrDialogs'
         local result = LrDialogs.confirm(
             "Publish Selection or All?",
-            "You have " .. #selectedQueuedPhotos .. " pending photos selected in your grid.\n"
-                .. "Would you like to publish only these selected photos, or publish all " .. #renditions .. " pending photos in the collection?",
-            "Publish Selected (" .. #selectedQueuedPhotos .. ")",
+            "You have " .. #selectedPhotos .. " pending photos selected in your grid.\n"
+                .. "Would you like to publish only these selected photos, or publish all " .. nPhotos .. " pending photos in the collection?",
+            "Publish Selected (" .. #selectedPhotos .. ")",
             "Cancel",
-            "Publish All (" .. #renditions .. ")"
+            "Publish All (" .. nPhotos .. ")"
         )
 
         if result == "cancel" then
-            -- Skip all renditions and abort the export safely
-            for _, rendition in ipairs(renditions) do
-                rendition:skipRender()
-            end
-            return {}, {}, false, {}
+            cancelAll = true
         elseif result == "ok" then
-            -- Selected only: build a map of selected photo IDs, skip the rest
             selectedPhotosMap = {}
-            for _, photo in ipairs(selectedQueuedPhotos) do
+            for _, photo in ipairs(selectedPhotos) do
                 selectedPhotosMap[photo.localIdentifier] = true
             end
         end
     end
 
-    -- Filter the active renditions list
-    local activeRenditions = {}
-    for _, rendition in ipairs(renditions) do
-        if selectedPhotosMap then
+    local renditions = {}
+    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+        if cancelAll then
+            rendition:skipRender()
+        elseif selectedPhotosMap then
             if selectedPhotosMap[rendition.photo.localIdentifier] then
-                table.insert(activeRenditions, rendition)
+                table.insert(renditions, rendition)
             else
                 rendition:skipRender()
             end
         else
-            table.insert(activeRenditions, rendition)
+            table.insert(renditions, rendition)
         end
     end
 
-    renditions = activeRenditions
+    if cancelAll then
+        return {}, {}, false, {}
+    end
+
     nPhotos = #renditions
     if nPhotos == 0 then
         return {}, {}, false, {}
