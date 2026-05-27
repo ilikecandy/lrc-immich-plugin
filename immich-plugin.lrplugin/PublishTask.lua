@@ -388,62 +388,10 @@ local function runPublishExport(
     albumAssetIds,
     visibility
 )
-    -- Determine if we should only publish the selected photos via a modal prompt
-    -- We do this BEFORE driving the slow iterator so it is instant!
-    local selectedPhotosMap = nil
-    local cancelAll = false
-
-    local LrApplication = import 'LrApplication'
-    local catalog = LrApplication.activeCatalog()
-    local selectedPhotos = catalog:getTargetPhotos()
-    
-    if selectedPhotos and #selectedPhotos > 0 and #selectedPhotos < nPhotos then
-        local LrDialogs = import 'LrDialogs'
-        local result = LrDialogs.confirm(
-            "Publish Selection or All?",
-            "You have " .. #selectedPhotos .. " pending photos selected in your grid.\n"
-                .. "Would you like to publish only these selected photos, or publish all " .. nPhotos .. " pending photos in the collection?",
-            "Publish Selected (" .. #selectedPhotos .. ")",
-            "Cancel",
-            "Publish All (" .. nPhotos .. ")"
-        )
-
-        if result == "cancel" then
-            cancelAll = true
-        elseif result == "ok" then
-            selectedPhotosMap = {}
-            for _, photo in ipairs(selectedPhotos) do
-                selectedPhotosMap[photo.localIdentifier] = true
-            end
-        end
-    end
-
     local renditions = {}
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
-        if cancelAll then
-            rendition:skipRender()
-        elseif selectedPhotosMap then
-            if selectedPhotosMap[rendition.photo.localIdentifier] then
-                table.insert(renditions, rendition)
-            else
-                rendition:skipRender()
-            end
-        else
-            table.insert(renditions, rendition)
-        end
+        table.insert(renditions, rendition)
     end
-
-    if cancelAll then
-        return {}, {}, false, {}
-    end
-
-    nPhotos = #renditions
-    if nPhotos == 0 then
-        return {}, {}, false, {}
-    end
-
-    local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
-    progressScope:setTitle(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
     local batches = {}
     local batchSize = 100
@@ -526,6 +474,56 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
     local albumCreationStrategy, albumId, albumAssetIds = resolvePublishAlbum(immich, exportContext)
 
     local nPhotos = exportSession:countRenditions()
+
+    -- Determine if we should only publish the selected photos via a modal prompt
+    -- We do this BEFORE driving the slow iterator so it is instant!
+    local selectedPhotosMap = nil
+    local cancelAll = false
+
+    local LrApplication = import 'LrApplication'
+    local catalog = LrApplication.activeCatalog()
+    local selectedPhotos = catalog:getTargetPhotos()
+    
+    if selectedPhotos and #selectedPhotos > 0 and #selectedPhotos < nPhotos then
+        local LrDialogs = import 'LrDialogs'
+        local result = LrDialogs.confirm(
+            "Publish Selection or All?",
+            "You have " .. #selectedPhotos .. " pending photos selected in your grid.\n"
+                .. "Would you like to publish only these selected photos, or publish all " .. nPhotos .. " pending photos in the collection?",
+            "Publish Selected (" .. #selectedPhotos .. ")",
+            "Cancel",
+            "Publish All (" .. nPhotos .. ")"
+        )
+
+        if result == "cancel" then
+            cancelAll = true
+        elseif result == "ok" then
+            selectedPhotosMap = {}
+            for _, photo in ipairs(selectedPhotos) do
+                selectedPhotosMap[photo.localIdentifier] = true
+            end
+        end
+    end
+
+    if cancelAll then
+        for photo in exportSession:photosToExport() do
+            exportSession:removePhoto(photo)
+        end
+        return nil
+    elseif selectedPhotosMap then
+        for photo in exportSession:photosToExport() do
+            if not selectedPhotosMap[photo.localIdentifier] then
+                exportSession:removePhoto(photo)
+            end
+        end
+    end
+
+    -- Recalculate count after potential removals
+    nPhotos = exportSession:countRenditions()
+    if nPhotos == 0 then
+        return nil
+    end
+
     log:info(
         "=== Publish START: "
             .. nPhotos
