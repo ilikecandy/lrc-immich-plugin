@@ -436,7 +436,6 @@ local function processSingleRenditionRenditions(
     state
 )
     local activeUploadsCount = 0
-    local lock = LrTasks.createSemaphore()
     local maxConcurrentUploads = 4 -- optimal concurrent uploads to maximize network throughput without overloading the server
 
     for _, rendition in ipairs(renditionsList) do
@@ -445,14 +444,7 @@ local function processSingleRenditionRenditions(
         end
 
         -- Limit the concurrency: wait for a free upload slot
-        while true do
-            lock:acquire()
-            local currentCount = activeUploadsCount
-            lock:release()
-            
-            if currentCount < maxConcurrentUploads then
-                break
-            end
+        while activeUploadsCount >= maxConcurrentUploads do
             LrTasks.sleep(0.05)
         end
 
@@ -465,9 +457,7 @@ local function processSingleRenditionRenditions(
         end
 
         if success then
-            lock:acquire()
             activeUploadsCount = activeUploadsCount + 1
-            lock:release()
 
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
@@ -477,11 +467,9 @@ local function processSingleRenditionRenditions(
             LrTasks.startAsyncTask(function()
                 if originalFileMode == "original_only" or originalFileMode == "original_plus_jpeg_if_edited" then
                     -- Stacking original+export flow inside the thread
-                    lock:acquire()
                     local originalPath = StackManager.getOriginalFilePath(photo)
                     if not originalPath then
                         table.insert(state.failures, photo:getFormattedMetadata("fileName") .. " (original not found)")
-                        lock:release()
                     else
                         local existingId = immich:checkIfAssetExistsEnhanced(
                             photo,
@@ -489,7 +477,6 @@ local function processSingleRenditionRenditions(
                             photo:getFormattedMetadata("fileName"),
                             photo:getFormattedMetadata("dateCreated")
                         )
-                        lock:release()
 
                         local id, errReason
                         if existingId == nil then
@@ -498,7 +485,6 @@ local function processSingleRenditionRenditions(
                             id, errReason = immich:replaceAsset(existingId, originalPath, deviceAssetId, visibility)
                         end
 
-                        lock:acquire()
                         if not id then
                             table.insert(
                                 state.failures,
@@ -524,7 +510,6 @@ local function processSingleRenditionRenditions(
                                     local fileName, dateCreated =
                                         photo:getFormattedMetadata("fileName"), photo:getFormattedMetadata("dateCreated")
                                     
-                                    lock:release()
                                     local existingExportId =
                                         immich:checkIfAssetExists(deviceAssetIdEdited, fileName, dateCreated)
                                     local exportId
@@ -539,7 +524,6 @@ local function processSingleRenditionRenditions(
                                         exportId = immich:uploadAsset(pathOrMessage, deviceAssetIdEdited, visibility)
                                     end
                                     
-                                    lock:acquire()
                                     if exportId then
                                         primaryId = exportId
                                         if not immich:createStack({ exportId, id }) then
@@ -567,7 +551,6 @@ local function processSingleRenditionRenditions(
                                 end
                             end
                         end
-                        lock:release()
                     end
                     UploadHelpers.safeDeleteTempFile(pathOrMessage)
                 else
@@ -586,7 +569,6 @@ local function processSingleRenditionRenditions(
                         id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
                     end
 
-                    lock:acquire()
                     if not id then
                         table.insert(
                             state.failures,
@@ -621,37 +603,25 @@ local function processSingleRenditionRenditions(
                         end
                     end
                     UploadHelpers.safeDeleteTempFile(pathOrMessage)
-                    lock:release()
                 end
 
                 -- Advance progress inside the thread as each upload completes
-                lock:acquire()
                 state.done = state.done + 1
                 progressScope:setPortionComplete(state.done, nPhotos)
                 if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
                     log:info("Export progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
                 end
                 activeUploadsCount = activeUploadsCount - 1
-                lock:release()
             end)
         else
             -- If rendering failed, advance progress instantly
-            lock:acquire()
             state.done = state.done + 1
             progressScope:setPortionComplete(state.done, nPhotos)
-            lock:release()
         end
     end
 
     -- Block the main thread until all active upload tasks have completed!
-    while true do
-        lock:acquire()
-        local remaining = activeUploadsCount
-        lock:release()
-
-        if remaining <= 0 then
-            break
-        end
+    while activeUploadsCount > 0 do
         LrTasks.sleep(0.05) -- check every 50ms
     end
 end
