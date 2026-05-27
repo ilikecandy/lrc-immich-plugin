@@ -265,7 +265,6 @@ local function processPublishSingleRenditionRenditions(
     local done = 0
 
     local activeUploadsCount = 0
-    local lock = LrTasks.createSemaphore()
     local maxConcurrentUploads = 4 -- optimal concurrent uploads to maximize network throughput without overloading the server
 
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
@@ -274,14 +273,7 @@ local function processPublishSingleRenditionRenditions(
         end
 
         -- Limit the concurrency: wait for a free upload slot if we reached our limit
-        while true do
-            lock:acquire()
-            local currentCount = activeUploadsCount
-            lock:release()
-            
-            if currentCount < maxConcurrentUploads then
-                break
-            end
+        while activeUploadsCount >= maxConcurrentUploads do
             LrTasks.sleep(0.05) -- yield to let active uploads finish
         end
 
@@ -294,9 +286,7 @@ local function processPublishSingleRenditionRenditions(
         end
 
         if success then
-            lock:acquire()
             activeUploadsCount = activeUploadsCount + 1
-            lock:release()
 
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
@@ -319,8 +309,6 @@ local function processPublishSingleRenditionRenditions(
                     id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
                 end
 
-                -- Protect shared state modifications with our semaphore lock
-                lock:acquire()
                 if not id then
                     table.insert(
                         failures,
@@ -355,26 +343,16 @@ local function processPublishSingleRenditionRenditions(
 
                 UploadHelpers.safeDeleteTempFile(pathOrMessage)
                 activeUploadsCount = activeUploadsCount - 1
-                lock:release()
             end)
         else
             -- If rendering failed, advance progress instantly
-            lock:acquire()
             done = done + 1
             progressScope:setPortionComplete(done, nPhotos)
-            lock:release()
         end
     end
 
     -- Block the main thread until all active upload tasks have completed!
-    while true do
-        lock:acquire()
-        local remaining = activeUploadsCount
-        lock:release()
-
-        if remaining <= 0 then
-            break
-        end
+    while activeUploadsCount > 0 do
         LrTasks.sleep(0.05) -- check every 50ms
     end
 
