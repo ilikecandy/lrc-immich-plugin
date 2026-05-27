@@ -389,9 +389,75 @@ local function runPublishExport(
     visibility
 )
     local renditions = {}
+    local queuedPhotosMap = {}
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
         table.insert(renditions, rendition)
+        queuedPhotosMap[rendition.photo.localIdentifier] = rendition
     end
+
+    -- Determine if we should only publish the selected photos via a modal prompt
+    local selectedPhotosMap = nil
+    local LrApplication = import 'LrApplication'
+    local catalog = LrApplication.activeCatalog()
+    local selectedPhotos = catalog:getTargetPhotos()
+    
+    local selectedQueuedPhotos = {}
+    if selectedPhotos and #selectedPhotos > 0 then
+        for _, photo in ipairs(selectedPhotos) do
+            if queuedPhotosMap[photo.localIdentifier] then
+                table.insert(selectedQueuedPhotos, photo)
+            end
+        end
+    end
+
+    if #selectedQueuedPhotos > 0 and #selectedQueuedPhotos < #renditions then
+        local LrDialogs = import 'LrDialogs'
+        local result = LrDialogs.confirm(
+            "Publish Selection or All?",
+            "You have " .. #selectedQueuedPhotos .. " pending photos selected in your grid.\n"
+                .. "Would you like to publish only these selected photos, or publish all " .. #renditions .. " pending photos in the collection?",
+            "Publish Selected (" .. #selectedQueuedPhotos .. ")",
+            "Cancel",
+            "Publish All (" .. #renditions .. ")"
+        )
+
+        if result == "cancel" then
+            -- Skip all renditions and abort the export safely
+            for _, rendition in ipairs(renditions) do
+                rendition:skipRender()
+            end
+            return {}, {}, false, {}
+        elseif result == "ok" then
+            -- Selected only: build a map of selected photo IDs, skip the rest
+            selectedPhotosMap = {}
+            for _, photo in ipairs(selectedQueuedPhotos) do
+                selectedPhotosMap[photo.localIdentifier] = true
+            end
+        end
+    end
+
+    -- Filter the active renditions list
+    local activeRenditions = {}
+    for _, rendition in ipairs(renditions) do
+        if selectedPhotosMap then
+            if selectedPhotosMap[rendition.photo.localIdentifier] then
+                table.insert(activeRenditions, rendition)
+            else
+                rendition:skipRender()
+            end
+        else
+            table.insert(activeRenditions, rendition)
+        end
+    end
+
+    renditions = activeRenditions
+    nPhotos = #renditions
+    if nPhotos == 0 then
+        return {}, {}, false, {}
+    end
+
+    local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
+    progressScope:setTitle(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
     local batches = {}
     local batchSize = 100
