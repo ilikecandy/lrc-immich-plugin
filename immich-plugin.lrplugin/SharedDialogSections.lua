@@ -180,6 +180,31 @@ function SharedDialogSections.getBatchingSection(f, propertyTable)
                     font = "<system/small>",
                 }),
             }),
+            f:row({
+                f:static_text({
+                    title = "Concurrent uploads:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:edit_field({
+                    value = bind("maxConcurrentUploads"),
+                    width_in_chars = 6,
+                    precision = 0,
+                    min = 1,
+                    max = 16,
+                    validate = function(_, val)
+                        local num = tonumber(val)
+                        if not num or num < 1 then
+                            return false, 4, "Concurrent uploads must be between 1 and 16."
+                        end
+                        return true, math.min(16, math.max(1, math.floor(num)))
+                    end,
+                }),
+                f:static_text({
+                    title = "threads (simultaneous network uploads)",
+                    font = "<system/small>",
+                }),
+            }),
         }),
     }
 end
