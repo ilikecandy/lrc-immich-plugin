@@ -436,7 +436,10 @@ local function processSingleRenditionRenditions(
     state
 )
     local activeUploadsCount = 0
-    local maxConcurrentUploads = 4 -- optimal concurrent uploads to maximize network throughput without overloading the server
+    local maxConcurrentUploads = 4
+    if exportParams and exportParams.maxConcurrentUploads and tonumber(exportParams.maxConcurrentUploads) then
+        maxConcurrentUploads = math.max(1, math.floor(tonumber(exportParams.maxConcurrentUploads)))
+    end
 
     for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
@@ -643,6 +646,13 @@ local function runExport(
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
         table.insert(renditions, rendition)
     end
+
+    nPhotos = #renditions
+    if nPhotos == 0 then
+        return {}, {}, false, {}
+    end
+
+    progressScope:setTitle(buildProgressTitle(nPhotos, exportParams.originalFileMode, exportParams.url or ""))
 
     local batches = {}
     local batchSize = 100

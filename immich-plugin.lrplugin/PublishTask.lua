@@ -283,16 +283,64 @@ local function processPublishSingleRenditionRenditions(
     end
 
     local activeUploadsCount = 0
-    local maxConcurrentUploads = 4 -- optimal concurrent uploads to maximize network throughput without overloading the server
+    local maxConcurrentUploads = 4
+    if exportParams and exportParams.maxConcurrentUploads and tonumber(exportParams.maxConcurrentUploads) then
+        maxConcurrentUploads = math.max(1, math.floor(tonumber(exportParams.maxConcurrentUploads)))
+    end
+
+    local completedQueue = {}
+
+    local function drainQueue()
+        while #completedQueue > 0 do
+            local item = table.remove(completedQueue, 1)
+            if item.id then
+                state.atLeastSomeSuccess = true
+                MetadataTask.setImmichAssetId(item.photo, item.id)
+                item.rendition:recordPublishedPhotoId(item.id)
+                item.rendition:recordPublishedPhotoUrl(immich:getAssetUrl(item.id))
+                state.exportedPrimaryByPhoto[item.photo.localIdentifier] = { assetId = item.id, photo = item.photo }
+                
+                if albumCreationStrategy == "folder" then
+                    local folderName = item.photo:getFormattedMetadata("folderName")
+                    local folderBasedAlbumId = immich:createOrGetAlbumFolderBased(folderName)
+                    if folderBasedAlbumId then
+                        immich:addAssetToAlbum(folderBasedAlbumId, item.id)
+                    end
+                else
+                    if albumId and (not albumAssetIds or not util.table_contains(albumAssetIds, item.id)) then
+                        immich:addAssetToAlbum(albumId, item.id)
+                    end
+                end
+            else
+                table.insert(
+                    state.failures,
+                    item.photo:getFormattedMetadata("fileName") .. " (" .. (item.errReason or "Upload failed") .. ")"
+                )
+            end
+
+            -- Advance progress safely on the main thread!
+            state.done = state.done + 1
+            progressScope:setPortionComplete(state.done, nPhotos)
+            if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
+                log:info("Publish progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
+            end
+
+            UploadHelpers.safeDeleteTempFile(item.path)
+        end
+    end
 
     for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
             break
         end
 
+        -- Drain any completed uploads at the start of each iteration
+        drainQueue()
+
         -- Limit the concurrency: wait for a free upload slot if we reached our limit
         while activeUploadsCount >= maxConcurrentUploads do
             LrTasks.sleep(0.05) -- yield to let active uploads finish
+            drainQueue() -- drain completed uploads while waiting
         end
 
         local success, pathOrMessage = rendition:waitForRender()
@@ -328,39 +376,15 @@ local function processPublishSingleRenditionRenditions(
                     id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
                 end
 
-                if not id then
-                    table.insert(
-                        state.failures,
-                        photo:getFormattedMetadata("fileName") .. " (" .. (errReason or "Upload failed") .. ")"
-                    )
-                else
-                    state.atLeastSomeSuccess = true
-                    MetadataTask.setImmichAssetId(photo, id)
-                    rendition:recordPublishedPhotoId(id)
-                    rendition:recordPublishedPhotoUrl(immich:getAssetUrl(id))
-                    state.exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = id, photo = photo }
-                    
-                    if albumCreationStrategy == "folder" then
-                        local folderName = rendition.photo:getFormattedMetadata("folderName")
-                        local folderBasedAlbumId = immich:createOrGetAlbumFolderBased(folderName)
-                        if folderBasedAlbumId then
-                            immich:addAssetToAlbum(folderBasedAlbumId, id)
-                        end
-                    else
-                        if albumId and (not albumAssetIds or not util.table_contains(albumAssetIds, id)) then
-                            immich:addAssetToAlbum(albumId, id)
-                        end
-                    end
-                end
+                -- Push the result to the completed queue safely (mutations are atomic between yields in Lua)
+                table.insert(completedQueue, {
+                    rendition = rendition,
+                    photo = photo,
+                    id = id,
+                    errReason = errReason,
+                    path = pathOrMessage
+                })
 
-                -- Advance progress inside the thread as each upload completes
-                state.done = state.done + 1
-                progressScope:setPortionComplete(state.done, nPhotos)
-                if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
-                    log:info("Publish progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
-                end
-
-                UploadHelpers.safeDeleteTempFile(pathOrMessage)
                 activeUploadsCount = activeUploadsCount - 1
             end)
         else
@@ -371,7 +395,8 @@ local function processPublishSingleRenditionRenditions(
     end
 
     -- Block the main thread until all active upload tasks have completed!
-    while activeUploadsCount > 0 do
+    while activeUploadsCount > 0 or #completedQueue > 0 do
+        drainQueue()
         LrTasks.sleep(0.05) -- check every 50ms
     end
 end
@@ -392,6 +417,14 @@ local function runPublishExport(
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
         table.insert(renditions, rendition)
     end
+
+    nPhotos = #renditions
+    if nPhotos == 0 then
+        return {}, {}, false, {}
+    end
+
+    local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
+    progressScope:setTitle(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
     local batches = {}
     local batchSize = 100
@@ -471,12 +504,10 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
         return nil
     end
 
-    local albumCreationStrategy, albumId, albumAssetIds = resolvePublishAlbum(immich, exportContext)
-
     local nPhotos = exportSession:countRenditions()
 
     -- Determine if we should only publish the selected photos via a modal prompt
-    -- We do this BEFORE driving the slow iterator so it is instant!
+    -- We do this BEFORE any network/album lookup calls so it is instant!
     local selectedPhotosMap = nil
     local cancelAll = false
 
@@ -523,6 +554,9 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
     if nPhotos == 0 then
         return nil
     end
+
+    -- Only fetch or create the album AFTER pruning the session so we don't block on network
+    local albumCreationStrategy, albumId, albumAssetIds = resolvePublishAlbum(immich, exportContext)
 
     log:info(
         "=== Publish START: "

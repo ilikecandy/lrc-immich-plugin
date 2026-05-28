@@ -21,6 +21,7 @@ return {
         { key = "lockedFolderMode", default = "none" },
         { key = "enableBatching", default = false },
         { key = "batchSize", default = 100 },
+        { key = "maxConcurrentUploads", default = 4 },
     },
 
     small_icon = "icons/logo_small.png",
