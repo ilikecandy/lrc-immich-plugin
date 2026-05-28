@@ -424,7 +424,7 @@ local function runPublishExport(
     end
 
     local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
-    progressScope:setTitle(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
+    progressScope:setCaption(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
     local batches = {}
     local batchSize = 100
@@ -499,7 +499,7 @@ end
 --------------------------------------------------------------------------------
 
 function PublishTask.processRenderedPhotos(functionContext, exportContext)
-    local exportSession, exportParams, immich = util.validateExportContextAndConnect(exportContext, "Publish")
+    local exportSession = exportContext and exportContext.exportSession
     if not exportSession then
         return nil
     end
@@ -507,7 +507,7 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
     local nPhotos = exportSession:countRenditions()
 
     -- Determine if we should only publish the selected photos via a modal prompt
-    -- We do this BEFORE any network/album lookup calls so it is instant!
+    -- We do this at the absolute beginning BEFORE any network connectivity checks to ensure it is instant!
     local selectedPhotosMap = nil
     local cancelAll = false
 
@@ -552,6 +552,12 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
     -- Recalculate count after potential removals
     nPhotos = exportSession:countRenditions()
     if nPhotos == 0 then
+        return nil
+    end
+
+    -- Validate export context and connect to Immich now that the session is pruned
+    local _, exportParams, immich = util.validateExportContextAndConnect(exportContext, "Publish")
+    if not immich then
         return nil
     end
 

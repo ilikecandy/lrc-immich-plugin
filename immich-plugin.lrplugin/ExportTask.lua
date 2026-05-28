@@ -652,7 +652,7 @@ local function runExport(
         return {}, {}, false, {}
     end
 
-    progressScope:setTitle(buildProgressTitle(nPhotos, exportParams.originalFileMode, exportParams.url or ""))
+    progressScope:setCaption(buildProgressTitle(nPhotos, exportParams.originalFileMode, exportParams.url or ""))
 
     local batches = {}
     local batchSize = 100
