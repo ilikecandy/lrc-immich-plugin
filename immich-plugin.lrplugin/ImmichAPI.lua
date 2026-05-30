@@ -1179,9 +1179,155 @@ end
 
 function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
     if not ensureConnectivity(self) then
-        return nil
+        return nil, "No connectivity"
     end
 
+    -- Import necessary Lightroom APIs inline
+    local LrDialogs = import 'LrDialogs'
+    local LrProgressScope = import 'LrProgressScope'
+    local LrUUID = import 'LrUUID'
+    local LrFileUtils = import 'LrFileUtils'
+    local LrPathUtils = import 'LrPathUtils'
+    local LrTasks = import 'LrTasks'
+
+    -- Check if we have a file chunk for upload (to run via our robust curl progress pipeline)
+    local fileChunk = nil
+    for _, chunk in ipairs(mimeChunks) do
+        if chunk.filePath and chunk.filePath ~= "" then
+            fileChunk = chunk
+            break
+        end
+    end
+
+    if fileChunk then
+        -- High-performance curl-based upload with real-time progress and error popups
+        local filePath = fileChunk.filePath
+        local fileName = fileChunk.fileName or LrPathUtils.leafName(filePath)
+        
+        -- Get total file size for progress calculations
+        local fileAttrs = LrFileUtils.fileAttributes(filePath)
+        local totalSize = fileAttrs and fileAttrs.fileSize or 0
+        
+        -- Create a dedicated progress scope for this file upload
+        local fileProgressScope = nil
+        if totalSize > 0 then
+            fileProgressScope = LrProgressScope({
+                title = "Uploading " .. fileName,
+                caption = "Starting upload...",
+                isCancelable = true,
+            })
+        end
+
+        local tempStdout = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_res_" .. LrUUID.generateUUID() .. ".json")
+        
+        local function escapeShellArg(arg)
+            return "'" .. string.gsub(arg, "'", "'\\''") .. "'"
+        end
+
+        local args = {
+            "curl",
+            "-w", escapeShellArg("\n%{http_code}"),
+            "--progress-bar",
+            "-o", escapeShellArg(tempStdout),
+            "-H", escapeShellArg("x-api-key: " .. safeApiKey(self)),
+            "-H", escapeShellArg("Accept: application/json"),
+        }
+
+        for _, chunk in ipairs(mimeChunks) do
+            if chunk.filePath then
+                local formValue = chunk.name .. "=@" .. chunk.filePath .. ";filename=" .. (chunk.fileName or LrPathUtils.leafName(chunk.filePath))
+                table.insert(args, "-F " .. escapeShellArg(formValue))
+            else
+                table.insert(args, "-F " .. escapeShellArg(chunk.name .. "=" .. tostring(chunk.value)))
+            end
+        end
+
+        local url = self.url .. self.apiBasePath .. apiPath
+        table.insert(args, escapeShellArg(url))
+
+        local cmd = table.concat(args, " ") .. " 2>&1"
+        log:trace("Executing curl upload: " .. cmd)
+
+        local pipe = io.popen(cmd)
+        if pipe then
+            local lastPercent = 0
+            for line in pipe:lines() do
+                -- Handle user cancellation in real-time
+                if fileProgressScope and fileProgressScope:isCanceled() then
+                    log:warn("User canceled the individual file upload. Terminating curl.")
+                    pipe:close()
+                    if fileProgressScope then
+                        fileProgressScope:done()
+                    end
+                    LrFileUtils.delete(tempStdout)
+                    return nil, "User canceled upload"
+                end
+
+                -- Parse percentage from progress meter
+                local percent = line:match("(%d+%.?%d*)%%")
+                if percent then
+                    local pNum = tonumber(percent)
+                    if pNum and pNum > lastPercent then
+                        lastPercent = pNum
+                        if fileProgressScope then
+                            fileProgressScope:setPortionComplete(pNum, 100)
+                            local currentSizeMB = (totalSize * pNum / 100) / 1024 / 1024
+                            local totalSizeMB = totalSize / 1024 / 1024
+                            fileProgressScope:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentSizeMB, totalSizeMB, pNum))
+                        end
+                    end
+                end
+                LrTasks.yield()
+            end
+            pipe:close()
+
+            if fileProgressScope then
+                fileProgressScope:done()
+            end
+
+            -- Read response and HTTP code from tempStdout
+            local fh = io.open(tempStdout, "r")
+            if fh then
+                local content = fh:read("*a")
+                fh:close()
+                LrFileUtils.delete(tempStdout)
+
+                if content and content ~= "" then
+                    local responseBody, httpStatusStr = content:match("^(.-)%s*\n?(%d+)$")
+                    if not responseBody then
+                        responseBody = content
+                        httpStatusStr = "0"
+                    end
+                    local httpStatus = tonumber(httpStatusStr) or 0
+
+                    if httpStatus == 200 or httpStatus == 201 then
+                        return safeDecodeJson(responseBody, "curl multipart POST")
+                    else
+                        local errMsg = string.format(
+                            "Failed to upload %s.\n\nServer Response (HTTP %s):\n%s",
+                            fileName,
+                            tostring(httpStatus),
+                            tostring(responseBody)
+                        )
+                        log:error("Curl upload failed: " .. errMsg)
+                        
+                        -- Pop up error immediately as requested
+                        LrDialogs.message("Upload Failed", errMsg, "critical")
+                        return nil, errMsg
+                    end
+                end
+            end
+            
+            local errMsg = "Upload failed: Curl completed but response file was empty or missing."
+            log:error(errMsg)
+            LrDialogs.message("Upload Failed", errMsg, "critical")
+            return nil, errMsg
+        else
+            log:warn("io.popen failed to execute curl. Falling back to native LrHttp.")
+        end
+    end
+
+    -- Fallback to native LrHttp if no file chunk, or if curl failed to execute
     logRequestStart(self, "multipart POST", apiPath)
     local response, headers = LrHttp.postMultipart(
         self.url .. self.apiBasePath .. apiPath,
@@ -1193,11 +1339,15 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
     if not headers then
         log:error("ImmichAPI multipart POST: no response headers (network error): " .. apiPath)
         ErrorHandler.handleError("No response from Immich server. Check URL and network.", "Connection failed")
-        return nil
+        return nil, "Connection failed"
     end
     if SUCCESS_STATUS_POST[headers.status] then
         return safeDecodeJson(response, "multipart POST")
     end
     local errReason = handleRequestFailure("multipart POST", apiPath, headers.status, headers, response)
+    
+    -- Show immediate modal popup for fallback failures too
+    local errMsg = string.format("Failed to upload via fallback request.\n\nStatus: %s\nReason: %s", tostring(headers.status), tostring(errReason))
+    LrDialogs.message("Upload Failed", errMsg, "critical")
     return nil, errReason
 end
