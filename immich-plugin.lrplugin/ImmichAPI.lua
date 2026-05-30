@@ -1221,7 +1221,14 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         local tempStdout = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_res_" .. LrUUID.generateUUID() .. ".json")
         
         local function escapeShellArg(arg)
-            return "'" .. string.gsub(arg, "'", "'\\''") .. "'"
+            if MAC_ENV then
+                -- macOS / Unix shell escaping
+                return "'" .. string.gsub(arg, "'", "'\\''") .. "'"
+            else
+                -- Windows / Wine cmd.exe shell escaping
+                local escaped = string.gsub(arg, '"', '\\"')
+                return '"' .. escaped .. '"'
+            end
         end
 
         local args = {
