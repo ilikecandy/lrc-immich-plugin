@@ -1233,7 +1233,7 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
 
         local args = {
             "curl",
-            "-w", escapeShellArg("\n%{http_code}"),
+            "-w", escapeShellArg("HTTP_STATUS:%{http_code}"),
             "--progress-bar",
             "-o", escapeShellArg(tempStdout),
             "-H", escapeShellArg("x-api-key: " .. safeApiKey(self)),
@@ -1307,7 +1307,7 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 LrFileUtils.delete(tempStdout)
 
                 if content and content ~= "" then
-                    local responseBody, httpStatusStr = content:match("^(.-)%s*\n?(%d+)$")
+                    local responseBody, httpStatusStr = content:match("^(.-)HTTP_STATUS:(%d+)$")
                     if not responseBody then
                         responseBody = content
                         httpStatusStr = "0"
