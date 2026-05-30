@@ -1253,6 +1253,11 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         table.insert(args, escapeShellArg(url))
 
         local cmd = table.concat(args, " ") .. " 2>&1"
+        if not MAC_ENV then
+            -- On Windows/Wine, cmd.exe /c strips the outer quotes when a command contains quotes.
+            -- Wrapping the entire command in double quotes preserves the inner quotes and executable path.
+            cmd = '"' .. cmd .. '"'
+        end
         log:trace("Executing curl upload: " .. cmd)
 
         local pipe = io.popen(cmd)
