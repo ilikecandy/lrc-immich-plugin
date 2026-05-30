@@ -1249,9 +1249,11 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         log:trace("Executing curl upload: " .. cmd)
 
         local pipe = io.popen(cmd)
+        local curlOutputs = {}
         if pipe then
             local lastPercent = 0
             for line in pipe:lines() do
+                table.insert(curlOutputs, line)
                 -- Handle user cancellation in real-time
                 if fileProgressScope and fileProgressScope:isCanceled() then
                     log:warn("User canceled the individual file upload. Terminating curl.")
@@ -1319,6 +1321,9 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
             end
             
             local errMsg = "Upload failed: Curl completed but response file was empty or missing."
+            if curlOutputs and #curlOutputs > 0 then
+                errMsg = errMsg .. "\n\nDetailed Curl Output:\n" .. table.concat(curlOutputs, "\n")
+            end
             log:error(errMsg)
             LrDialogs.message("Upload Failed", errMsg, "critical")
             return nil, errMsg
