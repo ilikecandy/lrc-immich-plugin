@@ -18,6 +18,8 @@ return {
         { key = "stackOriginalExport", default = false },
         { key = "stackLrStacks", default = false },
         { key = "lockedFolderMode", default = "none" },
+        { key = "enableBatching", default = false },
+        { key = "batchSize", default = 100 },
     },
 
     canExportVideo = true,
