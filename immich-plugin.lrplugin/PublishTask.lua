@@ -282,64 +282,97 @@ local function processPublishSingleRenditionRenditions(
         end
     end
 
+    local activeUploadsCount = 0
+    local maxConcurrentUploads = 4 -- optimal concurrent uploads to maximize network throughput without overloading the server
+
     for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
             break
         end
+
+        -- Limit the concurrency: wait for a free upload slot if we reached our limit
+        while activeUploadsCount >= maxConcurrentUploads do
+            LrTasks.sleep(0.05) -- yield to let active uploads finish
+        end
+
         local success, pathOrMessage = rendition:waitForRender()
         if progressScope:isCanceled() then
+            if success then
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+            end
             break
         end
+
         if success then
+            activeUploadsCount = activeUploadsCount + 1
+
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
-            local existingId = immich:checkIfAssetExistsEnhanced(
-                photo,
-                deviceAssetId,
-                photo:getFormattedMetadata("fileName"),
-                photo:getFormattedMetadata("dateCreated"),
-                albumAssetsCache
-            )
-            local id, errReason
-            if existingId == nil then
-                id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
-            else
-                -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
-                -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
-                id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
-            end
 
-            if not id then
-                table.insert(
-                    state.failures,
-                    photo:getFormattedMetadata("fileName") .. " (" .. (errReason or "Upload failed") .. ")"
+            -- Spawn an asynchronous task for parallel upload
+            LrTasks.startAsyncTask(function()
+                local existingId = immich:checkIfAssetExistsEnhanced(
+                    photo,
+                    deviceAssetId,
+                    photo:getFormattedMetadata("fileName"),
+                    photo:getFormattedMetadata("dateCreated"),
+                    albumAssetsCache
                 )
-            else
-                state.atLeastSomeSuccess = true
-                MetadataTask.setImmichAssetId(photo, id)
-                rendition:recordPublishedPhotoId(id)
-                rendition:recordPublishedPhotoUrl(immich:getAssetUrl(id))
-                state.exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = id, photo = photo }
-                if albumCreationStrategy == "folder" then
-                    local folderName = rendition.photo:getFormattedMetadata("folderName")
-                    local folderBasedAlbumId = immich:createOrGetAlbumFolderBased(folderName)
-                    if folderBasedAlbumId then
-                        immich:addAssetToAlbum(folderBasedAlbumId, id)
-                    end
+
+                local id, errReason
+                if existingId == nil then
+                    id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
                 else
-                    if albumId and (not albumAssetIds or not util.table_contains(albumAssetIds, id)) then
-                        immich:addAssetToAlbum(albumId, id)
+                    -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
+                    -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
+                    id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
+                end
+
+                if not id then
+                    table.insert(
+                        state.failures,
+                        photo:getFormattedMetadata("fileName") .. " (" .. (errReason or "Upload failed") .. ")"
+                    )
+                else
+                    state.atLeastSomeSuccess = true
+                    MetadataTask.setImmichAssetId(photo, id)
+                    rendition:recordPublishedPhotoId(id)
+                    rendition:recordPublishedPhotoUrl(immich:getAssetUrl(id))
+                    state.exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = id, photo = photo }
+                    
+                    if albumCreationStrategy == "folder" then
+                        local folderName = rendition.photo:getFormattedMetadata("folderName")
+                        local folderBasedAlbumId = immich:createOrGetAlbumFolderBased(folderName)
+                        if folderBasedAlbumId then
+                            immich:addAssetToAlbum(folderBasedAlbumId, id)
+                        end
+                    else
+                        if albumId and (not albumAssetIds or not util.table_contains(albumAssetIds, id)) then
+                            immich:addAssetToAlbum(albumId, id)
+                        end
                     end
                 end
-            end
-            UploadHelpers.safeDeleteTempFile(pathOrMessage)
+
+                -- Advance progress inside the thread as each upload completes
+                state.done = state.done + 1
+                progressScope:setPortionComplete(state.done, nPhotos)
+                if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
+                    log:info("Publish progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
+                end
+
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+                activeUploadsCount = activeUploadsCount - 1
+            end)
+        else
+            -- If rendering failed, advance progress instantly
+            state.done = state.done + 1
+            progressScope:setPortionComplete(state.done, nPhotos)
         end
-        -- Advance progress for every rendition, including failed renders, so the bar reaches 100%.
-        state.done = state.done + 1
-        progressScope:setPortionComplete(state.done, nPhotos)
-        if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
-            log:info("Publish progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
-        end
+    end
+
+    -- Block the main thread until all active upload tasks have completed!
+    while activeUploadsCount > 0 do
+        LrTasks.sleep(0.05) -- check every 50ms
     end
 end
 
