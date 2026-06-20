@@ -359,32 +359,44 @@ local function processPublishSingleRenditionRenditions(
 
             -- Spawn an asynchronous task for parallel upload
             LrTasks.startAsyncTask(function()
-                local existingId = immich:checkIfAssetExistsEnhanced(
-                    photo,
-                    deviceAssetId,
-                    photo:getFormattedMetadata("fileName"),
-                    photo:getFormattedMetadata("dateCreated"),
-                    albumAssetsCache
-                )
+                local function doUpload()
+                    local existingId = immich:checkIfAssetExistsEnhanced(
+                        photo,
+                        deviceAssetId,
+                        photo:getFormattedMetadata("fileName"),
+                        photo:getFormattedMetadata("dateCreated"),
+                        albumAssetsCache
+                    )
 
-                local id, errReason
-                if existingId == nil then
-                    id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
-                else
-                    -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
-                    -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
-                    id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
+                    local id, errReason
+                    if existingId == nil then
+                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
+                    else
+                        -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
+                        -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
+                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
+                    end
+
+                    table.insert(completedQueue, {
+                        rendition = rendition,
+                        photo = photo,
+                        id = id,
+                        errReason = errReason,
+                        path = pathOrMessage
+                    })
                 end
 
-                -- Push the result to the completed queue safely (mutations are atomic between yields in Lua)
-                table.insert(completedQueue, {
-                    rendition = rendition,
-                    photo = photo,
-                    id = id,
-                    errReason = errReason,
-                    path = pathOrMessage
-                })
-
+                local ok, err = LrTasks.pcall(doUpload)
+                if not ok then
+                    log:error("Publish upload task crashed: " .. tostring(err))
+                    table.insert(completedQueue, {
+                        rendition = rendition,
+                        photo = photo,
+                        id = nil,
+                        errReason = "Internal error: " .. tostring(err),
+                        path = pathOrMessage
+                    })
+                end
                 activeUploadsCount = activeUploadsCount - 1
             end)
         else

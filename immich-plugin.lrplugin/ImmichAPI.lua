@@ -1231,12 +1231,20 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
             end
         end
 
+        -- Write API key to temp header file to avoid exposing it on the command line (visible in ps)
+        local tempHeader = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_hdr_" .. LrUUID.generateUUID() .. ".txt")
+        local hdrFile = io.open(tempHeader, "w")
+        if hdrFile then
+            hdrFile:write("x-api-key: " .. safeApiKey(self) .. "\n")
+            hdrFile:close()
+        end
+
         local args = {
             "curl",
             "-w", escapeShellArg("HTTP_STATUS:%{http_code}"),
             "--progress-bar",
             "-o", escapeShellArg(tempStdout),
-            "-H", escapeShellArg("x-api-key: " .. safeApiKey(self)),
+            "-H", "@" .. escapeShellArg(tempHeader),
             "-H", escapeShellArg("Accept: application/json"),
         }
 
@@ -1269,11 +1277,14 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 -- Handle user cancellation in real-time
                 if fileProgressScope and fileProgressScope:isCanceled() then
                     log:warn("User canceled the individual file upload. Terminating curl.")
-                    pipe:close()
+            pipe:close()
+
+            LrFileUtils.delete(tempHeader)
                     if fileProgressScope then
                         fileProgressScope:done()
                     end
                     LrFileUtils.delete(tempStdout)
+                    LrFileUtils.delete(tempHeader)
                     return nil, "User canceled upload"
                 end
 
@@ -1305,6 +1316,7 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 local content = fh:read("*a")
                 fh:close()
                 LrFileUtils.delete(tempStdout)
+                LrFileUtils.delete(tempHeader)
 
                 if content and content ~= "" then
                     local responseBody, httpStatusStr = content:match("^(.-)HTTP_STATUS:(%d+)$")
@@ -1324,9 +1336,6 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                             tostring(responseBody)
                         )
                         log:error("Curl upload failed: " .. errMsg)
-                        
-                        -- Pop up error immediately as requested
-                        LrDialogs.message("Upload Failed", errMsg, "critical")
                         return nil, errMsg
                     end
                 end
@@ -1337,9 +1346,9 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 errMsg = errMsg .. "\n\nDetailed Curl Output:\n" .. table.concat(curlOutputs, "\n")
             end
             log:error(errMsg)
-            LrDialogs.message("Upload Failed", errMsg, "critical")
             return nil, errMsg
         else
+            LrFileUtils.delete(tempHeader)
             log:warn("io.popen failed to execute curl. Falling back to native LrHttp.")
         end
     end
@@ -1362,9 +1371,5 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         return safeDecodeJson(response, "multipart POST")
     end
     local errReason = handleRequestFailure("multipart POST", apiPath, headers.status, headers, response)
-    
-    -- Show immediate modal popup for fallback failures too
-    local errMsg = string.format("Failed to upload via fallback request.\n\nStatus: %s\nReason: %s", tostring(headers.status), tostring(errReason))
-    LrDialogs.message("Upload Failed", errMsg, "critical")
     return nil, errReason
 end

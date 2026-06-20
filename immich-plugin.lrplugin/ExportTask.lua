@@ -441,14 +441,89 @@ local function processSingleRenditionRenditions(
         maxConcurrentUploads = math.max(1, math.floor(tonumber(exportParams.maxConcurrentUploads)))
     end
 
+    local completedQueue = {}
+
+    -- Process completed uploads on the main thread where SDK catalog mutations are safe.
+    local function drainQueue()
+        while #completedQueue > 0 do
+            local item = table.remove(completedQueue, 1)
+            if item.crashed then
+                table.insert(state.failures, item.fileName .. " (internal error: " .. tostring(item.error) .. ")")
+            elseif item.isStackFlow then
+                if not item.originalPath then
+                    table.insert(state.failures, item.fileName .. " (original not found)")
+                elseif not item.id then
+                    table.insert(state.failures, item.fileName .. " - " .. (item.errReason or "Upload failed"))
+                else
+                    state.atLeastSomeSuccess = true
+                    MetadataTask.setImmichAssetId(item.photo, item.id)
+                    local primaryId = item.id
+                    if item.isEdited then
+                        if item.lrFormatOriginal then
+                            table.insert(state.stackWarnings, item.fileName
+                                .. ": skipped rendered export — 'Original / no reformat' does not produce"
+                                .. " an edited version. Switch to any rendered format (e.g. JPEG, TIFF, PNG).")
+                        elseif item.exportId then
+                            primaryId = item.exportId
+                            if not item.stackCreated then
+                                table.insert(state.stackWarnings, item.fileName .. ": failed to create stack")
+                            end
+                        else
+                            table.insert(state.stackWarnings, item.fileName .. ": failed to upload rendered export")
+                        end
+                    end
+                    state.exportedPrimaryByPhoto[item.photo.localIdentifier] = { assetId = primaryId, photo = item.photo }
+                    if useAlbum then
+                        immich:addAssetToAlbum(albumId, primaryId)
+                    elseif exportParams.albumMode == "folder" then
+                        local folderAlbumId = immich:createOrGetAlbumFolderBased(item.photo:getFormattedMetadata("folderName"))
+                        if folderAlbumId then
+                            immich:addAssetToAlbum(folderAlbumId, primaryId)
+                        end
+                    end
+                end
+            else
+                if not item.id then
+                    table.insert(state.failures, item.fileName .. " - " .. (item.errReason or "Upload failed"))
+                else
+                    state.atLeastSomeSuccess = true
+                    MetadataTask.setImmichAssetId(item.photo, item.id)
+                    state.exportedPrimaryByPhoto[item.photo.localIdentifier] = { assetId = item.id, photo = item.photo }
+                    if item.shouldStack then
+                        local _, stackError = StackManager.processPhotoWithStack(immich, item.rendition, item.id, exportParams, visibility)
+                        if stackError then
+                            table.insert(state.stackWarnings, item.fileName .. ": " .. stackError)
+                        end
+                    end
+                    if useAlbum then
+                        immich:addAssetToAlbum(albumId, item.id)
+                    elseif exportParams.albumMode == "folder" then
+                        local folderAlbumId = immich:createOrGetAlbumFolderBased(item.photo:getFormattedMetadata("folderName"))
+                        if folderAlbumId then
+                            immich:addAssetToAlbum(folderAlbumId, item.id)
+                        end
+                    end
+                end
+            end
+            UploadHelpers.safeDeleteTempFile(item.path)
+            state.done = state.done + 1
+            progressScope:setPortionComplete(state.done, nPhotos)
+            if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
+                log:info("Export progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
+            end
+        end
+    end
+
     for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
             break
         end
 
-        -- Limit the concurrency: wait for a free upload slot
+        drainQueue()
+
         while activeUploadsCount >= maxConcurrentUploads do
             LrTasks.sleep(0.05)
+            drainQueue()
         end
 
         local success, pathOrMessage = rendition:waitForRender()
@@ -465,167 +540,95 @@ local function processSingleRenditionRenditions(
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
             local originalFileMode = exportParams.originalFileMode
+            local fileName = photo:getFormattedMetadata("fileName")
+            local dateCreated = photo:getFormattedMetadata("dateCreated")
 
-            -- Spawn an asynchronous task for parallel upload
             LrTasks.startAsyncTask(function()
-                if originalFileMode == "original_only" or originalFileMode == "original_plus_jpeg_if_edited" then
-                    -- Stacking original+export flow inside the thread
-                    local originalPath = StackManager.getOriginalFilePath(photo)
-                    if not originalPath then
-                        table.insert(state.failures, photo:getFormattedMetadata("fileName") .. " (original not found)")
-                    else
-                        local existingId = immich:checkIfAssetExistsEnhanced(
-                            photo,
-                            deviceAssetId,
-                            photo:getFormattedMetadata("fileName"),
-                            photo:getFormattedMetadata("dateCreated")
-                        )
+                local function doUpload()
+                    local result = {
+                        photo = photo,
+                        rendition = rendition,
+                        path = pathOrMessage,
+                        fileName = fileName,
+                    }
 
-                        local id, errReason
-                        if existingId == nil then
-                            id, errReason = immich:uploadAsset(originalPath, deviceAssetId, visibility)
-                        else
-                            id, errReason = immich:replaceAsset(existingId, originalPath, deviceAssetId, visibility)
-                        end
+                    if originalFileMode == "original_only" or originalFileMode == "original_plus_jpeg_if_edited" then
+                        result.isStackFlow = true
+                        local originalPath = StackManager.getOriginalFilePath(photo)
+                        if originalPath then
+                            result.originalPath = originalPath
+                            local existingId = immich:checkIfAssetExistsEnhanced(photo, deviceAssetId, fileName, dateCreated)
+                            local id, errReason
+                            if existingId == nil then
+                                id, errReason = immich:uploadAsset(originalPath, deviceAssetId, visibility)
+                            else
+                                id, errReason = immich:replaceAsset(existingId, originalPath, deviceAssetId, visibility)
+                            end
+                            result.id = id
+                            result.errReason = errReason
 
-                        if not id then
-                            table.insert(
-                                state.failures,
-                                photo:getFormattedMetadata("fileName") .. " - " .. (errReason or "Upload failed")
-                            )
-                        else
-                            state.atLeastSomeSuccess = true
-                            MetadataTask.setImmichAssetId(photo, id)
-                            local primaryId = id
-                            if
-                                originalFileMode == "original_plus_jpeg_if_edited"
-                                and StackManager.hasEdits(photo, editedPhotosCache)
-                            then
+                            if id and originalFileMode == "original_plus_jpeg_if_edited" and StackManager.hasEdits(photo, editedPhotosCache) then
+                                result.isEdited = true
                                 if string.upper(exportParams.LR_format or "") == "ORIGINAL" then
-                                    table.insert(
-                                        state.stackWarnings,
-                                        photo:getFormattedMetadata("fileName")
-                                            .. ": skipped rendered export — 'Original / no reformat' does not produce"
-                                            .. " an edited version. Switch to any rendered format (e.g. JPEG, TIFF, PNG)."
-                                    )
+                                    result.lrFormatOriginal = true
                                 else
                                     local deviceAssetIdEdited = tostring(deviceAssetId) .. "_edited"
-                                    local fileName, dateCreated =
-                                        photo:getFormattedMetadata("fileName"), photo:getFormattedMetadata("dateCreated")
-                                    
-                                    local existingExportId =
-                                        immich:checkIfAssetExists(deviceAssetIdEdited, fileName, dateCreated)
+                                    local existingExportId = immich:checkIfAssetExists(deviceAssetIdEdited, fileName, dateCreated)
                                     local exportId
                                     if existingExportId then
-                                        exportId = immich:replaceAsset(
-                                            existingExportId,
-                                            pathOrMessage,
-                                            deviceAssetIdEdited,
-                                            visibility
-                                        )
+                                        exportId = immich:replaceAsset(existingExportId, pathOrMessage, deviceAssetIdEdited, visibility)
                                     else
                                         exportId = immich:uploadAsset(pathOrMessage, deviceAssetIdEdited, visibility)
                                     end
-                                    
                                     if exportId then
-                                        primaryId = exportId
-                                        if not immich:createStack({ exportId, id }) then
-                                            table.insert(
-                                                state.stackWarnings,
-                                                photo:getFormattedMetadata("fileName") .. ": failed to create stack"
-                                            )
-                                        end
-                                    else
-                                        table.insert(
-                                            state.stackWarnings,
-                                            photo:getFormattedMetadata("fileName") .. ": failed to upload rendered export"
-                                        )
+                                        result.exportId = exportId
+                                        result.stackCreated = immich:createStack({ exportId, id }) or false
                                     end
                                 end
                             end
-                            state.exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = primaryId, photo = photo }
-                            if useAlbum then
-                                immich:addAssetToAlbum(albumId, primaryId)
-                            elseif exportParams.albumMode == "folder" then
-                                local folderAlbumId =
-                                    immich:createOrGetAlbumFolderBased(photo:getFormattedMetadata("folderName"))
-                                if folderAlbumId then
-                                    immich:addAssetToAlbum(folderAlbumId, primaryId)
-                                end
-                            end
                         end
-                    end
-                    UploadHelpers.safeDeleteTempFile(pathOrMessage)
-                else
-                    -- Standard single rendition export path
-                    local existingId = immich:checkIfAssetExistsEnhanced(
-                        photo,
-                        deviceAssetId,
-                        photo:getFormattedMetadata("fileName"),
-                        photo:getFormattedMetadata("dateCreated")
-                    )
-
-                    local id, errReason
-                    if existingId == nil then
-                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
                     else
-                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
-                    end
+                        local existingId = immich:checkIfAssetExistsEnhanced(photo, deviceAssetId, fileName, dateCreated)
+                        local id, errReason
+                        if existingId == nil then
+                            id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
+                        else
+                            id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
+                        end
+                        result.id = id
+                        result.errReason = errReason
 
-                    if not id then
-                        table.insert(
-                            state.failures,
-                            photo:getFormattedMetadata("fileName") .. " - " .. (errReason or "Upload failed")
-                        )
-                    else
-                        state.atLeastSomeSuccess = true
-                        MetadataTask.setImmichAssetId(photo, id)
-                        state.exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = id, photo = photo }
-                        if originalFileMode and originalFileMode ~= "none" then
-                            local shouldStack = (originalFileMode == "all")
+                        if id and originalFileMode and originalFileMode ~= "none" then
+                            result.shouldStack = (originalFileMode == "all")
                                 or (originalFileMode == "edited" and StackManager.hasEdits(photo, editedPhotosCache))
-                            if shouldStack then
-                                local _, stackError =
-                                    StackManager.processPhotoWithStack(immich, rendition, id, exportParams, visibility)
-                                if stackError then
-                                    table.insert(
-                                        state.stackWarnings,
-                                        photo:getFormattedMetadata("fileName") .. ": " .. stackError
-                                    )
-                                end
-                            end
-                        end
-                        if useAlbum then
-                            immich:addAssetToAlbum(albumId, id)
-                        elseif exportParams.albumMode == "folder" then
-                            local folderAlbumId =
-                                immich:createOrGetAlbumFolderBased(photo:getFormattedMetadata("folderName"))
-                            if folderAlbumId then
-                                immich:addAssetToAlbum(folderAlbumId, id)
-                            end
                         end
                     end
-                    UploadHelpers.safeDeleteTempFile(pathOrMessage)
+
+                    table.insert(completedQueue, result)
                 end
 
-                -- Advance progress inside the thread as each upload completes
-                state.done = state.done + 1
-                progressScope:setPortionComplete(state.done, nPhotos)
-                if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
-                    log:info("Export progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
+                local ok, err = LrTasks.pcall(doUpload)
+                if not ok then
+                    log:error("Export upload task crashed: " .. tostring(err))
+                    table.insert(completedQueue, {
+                        crashed = true,
+                        error = err,
+                        photo = photo,
+                        path = pathOrMessage,
+                        fileName = fileName,
+                    })
                 end
                 activeUploadsCount = activeUploadsCount - 1
             end)
         else
-            -- If rendering failed, advance progress instantly
             state.done = state.done + 1
             progressScope:setPortionComplete(state.done, nPhotos)
         end
     end
 
-    -- Block the main thread until all active upload tasks have completed!
-    while activeUploadsCount > 0 do
-        LrTasks.sleep(0.05) -- check every 50ms
+    while activeUploadsCount > 0 or #completedQueue > 0 do
+        drainQueue()
+        LrTasks.sleep(0.05)
     end
 end
 
