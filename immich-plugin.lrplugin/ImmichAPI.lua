@@ -399,7 +399,15 @@ function ImmichAPI:uploadAsset(pathOrMessage, deviceAssetId, visibility)
         table.insert(mimeChunks, { name = "visibility", value = visibility })
     end
 
-    local parsedResponse, errReason = self:doMultiPartPostRequest(apiPath, mimeChunks)
+    local parsedResponse, errReason
+    for attempt = 1, 2 do
+        parsedResponse, errReason = self:doMultiPartPostRequest(apiPath, mimeChunks)
+        if parsedResponse then break end
+        if attempt == 1 then
+            log:warn("uploadAsset: attempt 1 failed: " .. tostring(errReason) .. " — retrying...")
+            LrTasks.sleep(1.0)
+        end
+    end
     if parsedResponse ~= nil then
         log:info("uploadAsset: " .. tostring(deviceAssetId) .. " -> " .. parsedResponse.id)
         return parsedResponse.id
@@ -814,17 +822,12 @@ function ImmichAPI:bulkCheckAssets(deviceAssetIds)
         return {}
     end
 
-    -- Build a map for quick lookup
-    -- The endpoint returns asset IDs, we need to get their deviceAssetIds to map back
-    local existingMap = {}
+    -- Return a set of existing asset IDs. The caller matches against locally stored
+    -- metadata (MetadataTask.getImmichAssetId) — no per-asset API calls needed.
+    local existingSet = {}
     for _, assetId in ipairs(response.existingIds) do
-        -- Get asset info to retrieve deviceAssetId
-        local assetInfo = self:getAssetInfo(assetId)
-        if assetInfo and assetInfo.deviceAssetId then
-            existingMap[assetInfo.deviceAssetId] = {
-                id = assetId,
-                deviceAssetId = assetInfo.deviceAssetId,
-            }
+        if assetId then  -- guard against nil entries (Immich server bug #10192)
+            existingSet[assetId] = true
         end
     end
 
@@ -835,7 +838,7 @@ function ImmichAPI:bulkCheckAssets(deviceAssetIds)
             .. #deviceAssetIds
             .. " checked"
     )
-    return existingMap
+    return existingSet
 end
 
 -- Enhanced duplicate detection that checks metadata first, then bulk check, then individual check
@@ -1182,195 +1185,50 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         return nil, "No connectivity"
     end
 
-    -- Import necessary Lightroom APIs inline
-    local LrDialogs = import 'LrDialogs'
-    local LrProgressScope = import 'LrProgressScope'
-    local LrUUID = import 'LrUUID'
-    local LrFileUtils = import 'LrFileUtils'
-    local LrPathUtils = import 'LrPathUtils'
-    local LrTasks = import 'LrTasks'
-
-    -- Check if we have a file chunk for upload (to run via our robust curl progress pipeline)
-    local fileChunk = nil
+    -- Check for a file chunk to build per-file progress tracking.
+    local totalSize = 0
+    local fileName = ""
     for _, chunk in ipairs(mimeChunks) do
         if chunk.filePath and chunk.filePath ~= "" then
-            fileChunk = chunk
+            fileName = chunk.fileName or LrPathUtils.leafName(chunk.filePath)
+            local attrs = LrFileUtils.fileAttributes(chunk.filePath)
+            totalSize = attrs and attrs.fileSize or 0
             break
         end
     end
 
-    if fileChunk then
-        -- High-performance curl-based upload with real-time progress and error popups
-        local filePath = fileChunk.filePath
-        local fileName = fileChunk.fileName or LrPathUtils.leafName(filePath)
-        
-        -- Get total file size for progress calculations
-        local fileAttrs = LrFileUtils.fileAttributes(filePath)
-        local totalSize = fileAttrs and fileAttrs.fileSize or 0
-        
-        -- Create a dedicated progress scope for this file upload
-        local fileProgressScope = nil
-        if totalSize > 0 then
-            fileProgressScope = LrProgressScope({
-                title = "Uploading " .. fileName,
-                caption = "Starting upload...",
-                isCancelable = true,
-            })
-        end
-
-        local tempStdout = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_res_" .. LrUUID.generateUUID() .. ".json")
-        
-        local function escapeShellArg(arg)
-            if MAC_ENV then
-                -- macOS / Unix shell escaping
-                return "'" .. string.gsub(arg, "'", "'\\''") .. "'"
-            else
-                -- Windows / Wine cmd.exe shell escaping
-                local escaped = string.gsub(arg, '"', '\\"')
-                return '"' .. escaped .. '"'
-            end
-        end
-
-        -- Write API key to temp header file to avoid exposing it on the command line (visible in ps)
-        local tempHeader = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_hdr_" .. LrUUID.generateUUID() .. ".txt")
-        local hdrFile = io.open(tempHeader, "w")
-        if hdrFile then
-            hdrFile:write("x-api-key: " .. safeApiKey(self) .. "\n")
-            hdrFile:close()
-        end
-
-        local args = {
-            "curl",
-            "-w", escapeShellArg("HTTP_STATUS:%{http_code}"),
-            "--progress-bar",
-            "-o", escapeShellArg(tempStdout),
-            "-H", "@" .. escapeShellArg(tempHeader),
-            "-H", escapeShellArg("Accept: application/json"),
-        }
-
-        for _, chunk in ipairs(mimeChunks) do
-            if chunk.filePath then
-                local formValue = chunk.name .. "=@" .. chunk.filePath .. ";filename=" .. (chunk.fileName or LrPathUtils.leafName(chunk.filePath))
-                table.insert(args, "-F " .. escapeShellArg(formValue))
-            else
-                table.insert(args, "-F " .. escapeShellArg(chunk.name .. "=" .. tostring(chunk.value)))
-            end
-        end
-
-        local url = self.url .. self.apiBasePath .. apiPath
-        table.insert(args, escapeShellArg(url))
-
-        local cmd = table.concat(args, " ") .. " 2>&1"
-        if not MAC_ENV then
-            -- On Windows/Wine, cmd.exe /c strips the outer quotes when a command contains quotes.
-            -- Wrapping the entire command in double quotes preserves the inner quotes and executable path.
-            cmd = '"' .. cmd .. '"'
-        end
-        log:trace("Executing curl upload: " .. cmd)
-
-        local pipe = io.popen(cmd)
-        local curlOutputs = {}
-        if pipe then
-            local lastPercent = 0
-            for line in pipe:lines() do
-                table.insert(curlOutputs, line)
-                -- Handle user cancellation in real-time
-                if fileProgressScope and fileProgressScope:isCanceled() then
-                    log:warn("User canceled the individual file upload. Terminating curl.")
-            pipe:close()
-
-            LrFileUtils.delete(tempHeader)
-                    if fileProgressScope then
-                        fileProgressScope:done()
-                    end
-                    LrFileUtils.delete(tempStdout)
-                    LrFileUtils.delete(tempHeader)
-                    return nil, "User canceled upload"
-                end
-
-                -- Parse percentage from progress meter
-                local percent = line:match("(%d+%.?%d*)%%")
-                if percent then
-                    local pNum = tonumber(percent)
-                    if pNum and pNum > lastPercent then
-                        lastPercent = pNum
-                        if fileProgressScope then
-                            fileProgressScope:setPortionComplete(pNum, 100)
-                            local currentSizeMB = (totalSize * pNum / 100) / 1024 / 1024
-                            local totalSizeMB = totalSize / 1024 / 1024
-                            fileProgressScope:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentSizeMB, totalSizeMB, pNum))
-                        end
-                    end
-                end
-                LrTasks.yield()
-            end
-            pipe:close()
-
-            if fileProgressScope then
-                fileProgressScope:done()
-            end
-
-            -- Extract HTTP status from curl stdout (where -w writes it).
-            -- The response body is in the temp file (where -o writes it).
-            local httpStatus = 0
-            if curlOutputs and #curlOutputs > 0 then
-                for i = #curlOutputs, 1, -1 do
-                    local statusMatch = curlOutputs[i]:match("HTTP_STATUS:(%d+)")
-                    if statusMatch then
-                        httpStatus = tonumber(statusMatch) or 0
-                        break
-                    end
-                end
-            end
-
-            -- Read response body from temp file
-            local fh = io.open(tempStdout, "r")
-            if fh then
-                local content = fh:read("*a")
-                fh:close()
-                LrFileUtils.delete(tempStdout)
-                LrFileUtils.delete(tempHeader)
-
-                if content and content ~= "" then
-                    if httpStatus == 200 or httpStatus == 201 then
-                        return safeDecodeJson(content, "curl multipart POST")
-                    else
-                        local errMsg = string.format(
-                            "Failed to upload %s.\n\nServer Response (HTTP %s):\n%s",
-                            fileName,
-                            tostring(httpStatus),
-                            tostring(content)
-                        )
-                        log:error("Curl upload failed: " .. errMsg)
-                        return nil, errMsg
-                    end
-                end
-            end
-            
-            local errMsg = "Upload failed: Curl completed but response file was empty or missing."
-            if curlOutputs and #curlOutputs > 0 then
-                errMsg = errMsg .. "\n\nDetailed Curl Output:\n" .. table.concat(curlOutputs, "\n")
-            end
-            log:error(errMsg)
-            return nil, errMsg
-        else
-            LrFileUtils.delete(tempHeader)
-            log:warn("io.popen failed to execute curl. Falling back to native LrHttp.")
+    local fileProgressScope = nil
+    local callbackFn = nil
+    if totalSize > 0 then
+        local LrProgressScope = import 'LrProgressScope'
+        fileProgressScope = LrProgressScope({
+            title = "Uploading " .. fileName,
+            caption = "Starting upload...",
+            isCancelable = true,
+        })
+        callbackFn = function(progress)
+            fileProgressScope:setPortionComplete(progress * 100, 100)
+            local currentMB = (totalSize * progress) / 1024 / 1024
+            local totalMB = totalSize / 1024 / 1024
+            fileProgressScope:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentMB, totalMB, progress * 100))
         end
     end
 
-    -- Fallback to native LrHttp if no file chunk, or if curl failed to execute
     logRequestStart(self, "multipart POST", apiPath)
     local response, headers = LrHttp.postMultipart(
         self.url .. self.apiBasePath .. apiPath,
         mimeChunks,
         self:createHeadersForMultipart(),
-        HTTP_TIMEOUT_UPLOAD
+        HTTP_TIMEOUT_UPLOAD,
+        callbackFn
     )
+
+    if fileProgressScope then
+        fileProgressScope:done()
+    end
 
     if not headers then
         log:error("ImmichAPI multipart POST: no response headers (network error): " .. apiPath)
-        ErrorHandler.handleError("No response from Immich server. Check URL and network.", "Connection failed")
         return nil, "Connection failed"
     end
     if SUCCESS_STATUS_POST[headers.status] then

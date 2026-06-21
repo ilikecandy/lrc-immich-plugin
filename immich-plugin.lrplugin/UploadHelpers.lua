@@ -5,11 +5,49 @@ Provides:
 - Sorting original+export rendition pairs for correct Immich stack ordering
 - Preserving Lightroom stacks in Immich
 - Safe temporary file deletion (ensures cleanup on error or cancel)
+- Shared batch splitting and upload state creation
 ]]
 
 require("StackManager")
 
 UploadHelpers = {}
+
+-------------------------------------------------------------------------------
+-- Create a fresh upload state table used by both export and publish flows.
+function UploadHelpers.createUploadState()
+    return {
+        done = 0,
+        failures = {},
+        stackWarnings = {},
+        atLeastSomeSuccess = false,
+        exportedPrimaryByPhoto = {},
+    }
+end
+
+-------------------------------------------------------------------------------
+-- Split a list of renditions into batches. When batching is enabled, uses
+-- the configured batchSize; otherwise returns one batch containing everything.
+function UploadHelpers.splitIntoBatches(renditions, exportParams)
+    local batches = {}
+    local nPhotos = #renditions
+    if nPhotos == 0 then
+        return batches
+    end
+
+    local batchSize = nPhotos
+    if exportParams and exportParams.enableBatching and exportParams.batchSize and tonumber(exportParams.batchSize) then
+        batchSize = math.max(1, math.floor(tonumber(exportParams.batchSize)))
+    end
+
+    for i = 1, nPhotos, batchSize do
+        local batch = {}
+        for j = i, math.min(i + batchSize - 1, nPhotos) do
+            table.insert(batch, renditions[j])
+        end
+        table.insert(batches, batch)
+    end
+    return batches
+end
 
 --------------------------------------------------------------------------------
 -- Delete a temporary file; never throws. Call after each upload so temp files

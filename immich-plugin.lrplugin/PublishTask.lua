@@ -438,29 +438,8 @@ local function runPublishExport(
     local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
     progressScope:setCaption(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
-    local batches = {}
-    local batchSize = 100
-    if exportParams.enableBatching and exportParams.batchSize and tonumber(exportParams.batchSize) then
-        batchSize = math.max(1, math.floor(tonumber(exportParams.batchSize)))
-    else
-        batchSize = nPhotos
-    end
-
-    for i = 1, nPhotos, batchSize do
-        local batch = {}
-        for j = i, math.min(i + batchSize - 1, nPhotos) do
-            table.insert(batch, renditions[j])
-        end
-        table.insert(batches, batch)
-    end
-
-    local state = {
-        done = 0,
-        failures = {},
-        stackWarnings = {},
-        atLeastSomeSuccess = false,
-        exportedPrimaryByPhoto = {}
-    }
+    local batches = UploadHelpers.splitIntoBatches(renditions, exportParams)
+    local state = UploadHelpers.createUploadState()
 
     local useStacking = exportParams.stackOriginalExport
     local mode = exportParams.originalFileMode

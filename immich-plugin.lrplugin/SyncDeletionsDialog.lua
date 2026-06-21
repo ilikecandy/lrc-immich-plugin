@@ -9,22 +9,6 @@ local function runMobileDeletionsScan()
             return
         end
 
-        local allPhotos = catalog:getAllPhotos()
-        
-        -- Phase 1: Filter photos with an Immich Asset ID
-        local matchedPhotos = {}
-        for _, photo in ipairs(allPhotos) do
-            local assetId = photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
-            if assetId and assetId ~= "" then
-                table.insert(matchedPhotos, photo)
-            end
-        end
-
-        if #matchedPhotos == 0 then
-            LrDialogs.message("Scan Complete", "No uploaded Immich assets found in your Lightroom catalog to scan.", "info")
-            return
-        end
-
         local progressScope = LrProgressScope({
             title = "Scanning Immich for Mobile Deletions",
             caption = "Initializing connection...",
@@ -37,59 +21,34 @@ local function runMobileDeletionsScan()
             return
         end
 
-        -- Phase 2: Bulk check deviceAssetIds in batches of 500
-        progressScope:setCaption("Performing bulk server check...")
-        local existingDeviceAssetIds = {}
-        for i = 1, #matchedPhotos, 500 do
-            if progressScope:isCanceled() then break end
-            
-            local batchIds = {}
-            for j = i, math.min(i + 499, #matchedPhotos) do
-                local photo = matchedPhotos[j]
-                local devId = util.getPhotoDeviceId(photo)
-                if devId then
-                    table.insert(batchIds, devId .. "_export")
-                    table.insert(batchIds, devId)
-                end
-            end
-            
-            local existingMap = immich:bulkCheckAssets(batchIds)
-            for k, _ in pairs(existingMap) do
-                existingDeviceAssetIds[k] = true
-            end
-            progressScope:setPortionComplete(i, #matchedPhotos)
-        end
-
-        -- Phase 3: Double-check missing items individually (avoid false positives due to network glitches or mismatches)
-        progressScope:setCaption("Double-checking potential deletions...")
+        local allPhotos = catalog:getAllPhotos()
+        local totalPhotos = #allPhotos
+        local batchSize = 500
         local culledPhotos = {}
-        local checkedCount = 0
-        
-        for idx, photo in ipairs(matchedPhotos) do
+
+        -- Stream through catalog photos in batches to avoid storing everything in memory.
+        local currentBatch = {}
+        local scannedCount = 0
+        for _, photo in ipairs(allPhotos) do
+            scannedCount = scannedCount + 1
+            if scannedCount % 5000 == 0 then
+                progressScope:setPortionComplete(scannedCount, totalPhotos)
+                progressScope:setCaption(string.format("Scanning catalog: %d / %d photos...", scannedCount, totalPhotos))
+            end
+
             if progressScope:isCanceled() then break end
-            
-            local devId = util.getPhotoDeviceId(photo)
-            local existsInBulk = false
-            if devId then
-                if existingDeviceAssetIds[devId] or existingDeviceAssetIds[devId .. "_export"] then
-                    existsInBulk = true
+
+            local assetId = photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
+            if assetId and assetId ~= "" then
+                table.insert(currentBatch, { photo = photo, assetId = assetId })
+                if #currentBatch >= batchSize then
+                    processBatch(immich, currentBatch, culledPhotos, progressScope)
+                    currentBatch = {}
                 end
             end
-            
-            if not existsInBulk then
-                -- Double check by direct API query
-                local assetId = photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
-                if assetId and assetId ~= "" then
-                    local info = immich:doGetRequestAllow404("/assets/" .. assetId)
-                    if not info then
-                        table.insert(culledPhotos, photo)
-                    end
-                end
-            end
-            
-            checkedCount = checkedCount + 1
-            progressScope:setPortionComplete(checkedCount, #matchedPhotos)
-            progressScope:setCaption(string.format("Checking: %d of %d (Found %d mobile-deleted)", checkedCount, #matchedPhotos, #culledPhotos))
+        end
+        if #currentBatch > 0 then
+            processBatch(immich, currentBatch, culledPhotos, progressScope)
         end
 
         progressScope:done()
@@ -115,7 +74,6 @@ local function runMobileDeletionsScan()
             catalog:withWriteAccessDo("Create Immich Culled Collection", function()
                 local collection = catalog:createCollection("Immich Mobile Deleted / Culled", nil, true)
                 if collection then
-                    -- Clear existing photos in the collection first to keep it fresh
                     local existing = collection:getPhotos()
                     if #existing > 0 then
                         collection:removePhotos(existing)
@@ -126,6 +84,65 @@ local function runMobileDeletionsScan()
             LrDialogs.message("Success", string.format("Added %d photos to collection 'Immich Mobile Deleted / Culled'.\n\nYou can now select this collection in the left panel to review and delete them from your catalog.", #culledPhotos), "info")
         end
     end)
+end
+
+-- Process a batch of matched photos: bulk check then concurrent double-check.
+local function processBatch(immich, batch, culledPhotos, progressScope)
+    -- Bulk check: send deviceAssetIds, get back existing asset UUIDs.
+    local batchIds = {}
+    for _, entry in ipairs(batch) do
+        local devId = util.getPhotoDeviceId(entry.photo)
+        if devId then
+            table.insert(batchIds, devId .. "_export")
+            table.insert(batchIds, devId)
+        end
+    end
+
+    local existingAssetIds = {}
+    local existingSet = immich:bulkCheckAssets(batchIds)
+    for assetId, _ in pairs(existingSet) do
+        existingAssetIds[assetId] = true
+    end
+
+    -- Concurrent double-check for photos not confirmed by bulk check.
+    local activeChecks = 0
+    local maxConcurrent = 8
+    local completedQueue = {}
+
+    local function drainResults()
+        while #completedQueue > 0 do
+            local item = table.remove(completedQueue, 1)
+            if not item.exists then
+                table.insert(culledPhotos, item.photo)
+            end
+        end
+    end
+
+    for _, entry in ipairs(batch) do
+        if progressScope:isCanceled() then break end
+        drainResults()
+
+        local existsInBulk = existingAssetIds[entry.assetId]
+
+        if not existsInBulk then
+            while activeChecks >= maxConcurrent do
+                LrTasks.sleep(0.05)
+                drainResults()
+            end
+
+            activeChecks = activeChecks + 1
+            LrTasks.startAsyncTask(function()
+                local exists = immich:doGetRequestAllow404("/assets/" .. entry.assetId) ~= nil
+                table.insert(completedQueue, { photo = entry.photo, exists = exists })
+                activeChecks = activeChecks - 1
+            end)
+        end
+    end
+
+    while activeChecks > 0 or #completedQueue > 0 do
+        drainResults()
+        LrTasks.sleep(0.05)
+    end
 end
 
 local function runServerOrphansScan(syncDeletionsAlbum)
