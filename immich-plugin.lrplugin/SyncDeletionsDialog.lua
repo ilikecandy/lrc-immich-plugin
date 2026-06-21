@@ -1,6 +1,65 @@
 local ImportServiceProvider = require("ImportServiceProvider")
 local getImmichAlbums = ImportServiceProvider.getImmichAlbums
 
+-- Process a batch of matched photos: bulk check then concurrent double-check.
+local function processBatch(immich, batch, culledPhotos, progressScope)
+    -- Bulk check: send deviceAssetIds, get back existing asset UUIDs.
+    local batchIds = {}
+    for _, entry in ipairs(batch) do
+        local devId = util.getPhotoDeviceId(entry.photo)
+        if devId then
+            table.insert(batchIds, devId .. "_export")
+            table.insert(batchIds, devId)
+        end
+    end
+
+    local existingAssetIds = {}
+    local existingSet = immich:bulkCheckAssets(batchIds)
+    for assetId, _ in pairs(existingSet) do
+        existingAssetIds[assetId] = true
+    end
+
+    -- Concurrent double-check for photos not confirmed by bulk check.
+    local activeChecks = 0
+    local maxConcurrent = 8
+    local completedQueue = {}
+
+    local function drainResults()
+        while #completedQueue > 0 do
+            local item = table.remove(completedQueue, 1)
+            if not item.exists then
+                table.insert(culledPhotos, item.photo)
+            end
+        end
+    end
+
+    for _, entry in ipairs(batch) do
+        if progressScope:isCanceled() then break end
+        drainResults()
+
+        local existsInBulk = existingAssetIds[entry.assetId]
+
+        if not existsInBulk then
+            while activeChecks >= maxConcurrent do
+                LrTasks.sleep(0.05)
+                drainResults()
+            end
+
+            activeChecks = activeChecks + 1
+            LrTasks.startAsyncTask(function()
+                local exists = immich:doGetRequestAllow404("/assets/" .. entry.assetId) ~= nil
+                table.insert(completedQueue, { photo = entry.photo, exists = exists })
+                activeChecks = activeChecks - 1
+            end)
+        end
+    end
+
+    while activeChecks > 0 or #completedQueue > 0 do
+        drainResults()
+        LrTasks.sleep(0.05)
+    end
+end
+
 local function runMobileDeletionsScan()
     LrTasks.startAsyncTask(function()
         local catalog = LrApplication.activeCatalog()
@@ -84,65 +143,6 @@ local function runMobileDeletionsScan()
             LrDialogs.message("Success", string.format("Added %d photos to collection 'Immich Mobile Deleted / Culled'.\n\nYou can now select this collection in the left panel to review and delete them from your catalog.", #culledPhotos), "info")
         end
     end)
-end
-
--- Process a batch of matched photos: bulk check then concurrent double-check.
-local function processBatch(immich, batch, culledPhotos, progressScope)
-    -- Bulk check: send deviceAssetIds, get back existing asset UUIDs.
-    local batchIds = {}
-    for _, entry in ipairs(batch) do
-        local devId = util.getPhotoDeviceId(entry.photo)
-        if devId then
-            table.insert(batchIds, devId .. "_export")
-            table.insert(batchIds, devId)
-        end
-    end
-
-    local existingAssetIds = {}
-    local existingSet = immich:bulkCheckAssets(batchIds)
-    for assetId, _ in pairs(existingSet) do
-        existingAssetIds[assetId] = true
-    end
-
-    -- Concurrent double-check for photos not confirmed by bulk check.
-    local activeChecks = 0
-    local maxConcurrent = 8
-    local completedQueue = {}
-
-    local function drainResults()
-        while #completedQueue > 0 do
-            local item = table.remove(completedQueue, 1)
-            if not item.exists then
-                table.insert(culledPhotos, item.photo)
-            end
-        end
-    end
-
-    for _, entry in ipairs(batch) do
-        if progressScope:isCanceled() then break end
-        drainResults()
-
-        local existsInBulk = existingAssetIds[entry.assetId]
-
-        if not existsInBulk then
-            while activeChecks >= maxConcurrent do
-                LrTasks.sleep(0.05)
-                drainResults()
-            end
-
-            activeChecks = activeChecks + 1
-            LrTasks.startAsyncTask(function()
-                local exists = immich:doGetRequestAllow404("/assets/" .. entry.assetId) ~= nil
-                table.insert(completedQueue, { photo = entry.photo, exists = exists })
-                activeChecks = activeChecks - 1
-            end)
-        end
-    end
-
-    while activeChecks > 0 or #completedQueue > 0 do
-        drainResults()
-        LrTasks.sleep(0.05)
-    end
 end
 
 local function runServerOrphansScan(syncDeletionsAlbum)
@@ -320,10 +320,11 @@ return {
                     spacing = f:control_spacing(),
                     margin = 8,
                     f:static_text({
-                        title = "Finds photos in your Lightroom catalog that have been deleted/trashed directly on Immich (e.g., culled from your phone in bed). Found photos will be placed in a Lightroom collection named 'Immich Mobile Deleted / Culled' so you can review and delete them locally.",
+                        title = "Finds photos in your Lightroom catalog that have been deleted/trashed directly on Immich (e.g., culled from your phone). Found photos will be placed in a Lightroom collection named 'Immich Mobile Deleted / Culled' so you can review and delete them locally.",
                         alignment = "left",
                         font = "<system/small>",
-                        width_in_chars = 60,
+                        width_in_chars = 50,
+                        height_in_lines = 4,
                         fill_horizontal = 1,
                     }),
                     f:row({
@@ -349,7 +350,8 @@ return {
                         title = "Finds photos on Immich that were completely deleted from your local Lightroom catalog. You can review the list of these orphaned assets and choose to delete them from the Immich server in one click.",
                         alignment = "left",
                         font = "<system/small>",
-                        width_in_chars = 60,
+                        width_in_chars = 50,
+                        height_in_lines = 4,
                         fill_horizontal = 1,
                     }),
                     f:row({
@@ -380,7 +382,6 @@ return {
             title = "Sync & Clean Deletions",
             contents = contents,
             actionVerb = "Close",
-            cancelVerb = "", -- Hide cancel button to make Close the only option
         })
 
         if result == "scan_mobile" then
