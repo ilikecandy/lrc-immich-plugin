@@ -1238,7 +1238,6 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope
         local lastBytes = 0
         local lastTime = startTime
         local speedEma = nil  -- exponential moving average, bytes/sec
-        local capturedFileName = fileName
 
         callbackFn = function(progress)
             local now = LrDate.currentTime()
@@ -1258,8 +1257,8 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope
             scopeForCallback:setPortionComplete(progress * 100, 100)
             local currentMB = totalSize * progress / 1048576
             local totalMB = totalSize / 1048576
-            local line = string.format("%s  •  %.1f / %.1f MB (%.0f%%)\n%s  •  %s",
-                capturedFileName,
+            local line = string.format("%s  •  %.1f / %.1f MB (%.0f%%)  •  %s  •  %s",
+                fileName,
                 currentMB, totalMB, progress * 100,
                 speedEma and formatSpeed(speedEma) or "—",
                 speedEma and progress > 0.01 and formatETA(totalSize * (1 - progress) / speedEma) or "—"
