@@ -1257,7 +1257,7 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope
             scopeForCallback:setPortionComplete(progress * 100, 100)
             local currentMB = totalSize * progress / 1048576
             local totalMB = totalSize / 1048576
-            local line = string.format("%.0f/%.0f MB %.0f%%  %s  %s",
+            local line = string.format("%.1f / %.1f MB (%.0f%%)\n%s  •  %s remaining",
                 currentMB, totalMB, progress * 100,
                 speedEma and formatSpeed(speedEma) or "—",
                 speedEma and progress > 0.01 and formatETA(totalSize * (1 - progress) / speedEma) or "—"
