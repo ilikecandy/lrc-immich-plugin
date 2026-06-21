@@ -1265,7 +1265,7 @@ function ImmichAPI:doCurlUpload(apiPath, mimeChunks, fileProgressScope)
 
     local args = {
         "curl",
-        "-#",                               -- progress bar for parsing
+        "--progress-bar",                   -- outputs percentage to stderr even when piped
         "-w", escapeShellArg("\\nHTTP_STATUS:%{http_code}"),
         "-o", escapeShellArg(tempStdout),
         "-H", "@" .. escapeShellArg(tempHeader),
