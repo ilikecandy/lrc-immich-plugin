@@ -1265,7 +1265,7 @@ function ImmichAPI:doCurlUpload(apiPath, mimeChunks, fileProgressScope)
 
     local args = {
         "curl",
-        "-sS",                               -- silent but show errors
+        "-#",                               -- progress bar for parsing
         "-w", escapeShellArg("\\nHTTP_STATUS:%{http_code}"),
         "-o", escapeShellArg(tempStdout),
         "-H", "@" .. escapeShellArg(tempHeader),
