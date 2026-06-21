@@ -715,9 +715,20 @@ local function runExport(
     local batches = UploadHelpers.splitIntoBatches(renditions, exportParams)
     local state = UploadHelpers.createUploadState()
 
-    for _, batch in ipairs(batches) do
+    for batchIdx, batch in ipairs(batches) do
         if progressScope:isCanceled() then
             break
+        end
+
+        -- Pre-render next batch's first photos while current batch uploads
+        local nextBatch = batches[batchIdx + 1]
+        if nextBatch then
+            local preRenderCount = math.min(4, #nextBatch)
+            for i = 1, preRenderCount do
+                LrTasks.startAsyncTask(function()
+                    nextBatch[i]:waitForRender()
+                end)
+            end
         end
 
         if exportParams.stackOriginalExport then
