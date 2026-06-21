@@ -289,6 +289,12 @@ local function processPublishSingleRenditionRenditions(
     end
 
     local completedQueue = {}
+    local LrProgressScope = import 'LrProgressScope'
+    local fileProgressScope = LrProgressScope({
+        title = "Uploading",
+        caption = "Waiting...",
+        isCancelable = true,
+    })
 
     local function drainQueue()
         while #completedQueue > 0 do
@@ -370,11 +376,11 @@ local function processPublishSingleRenditionRenditions(
 
                     local id, errReason
                     if existingId == nil then
-                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility)
+                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility, fileProgressScope)
                     else
                         -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
                         -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
-                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility)
+                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility, fileProgressScope)
                     end
 
                     table.insert(completedQueue, {
@@ -411,6 +417,7 @@ local function processPublishSingleRenditionRenditions(
         drainQueue()
         LrTasks.sleep(0.05) -- check every 50ms
     end
+    fileProgressScope:done()
 end
 
 --------------------------------------------------------------------------------

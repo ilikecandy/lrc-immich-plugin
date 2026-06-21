@@ -366,7 +366,7 @@ function ImmichAPI:getAssetUrl(id)
     return self.url .. "/photos/" .. id
 end
 
-function ImmichAPI:uploadAsset(pathOrMessage, deviceAssetId, visibility)
+function ImmichAPI:uploadAsset(pathOrMessage, deviceAssetId, visibility, fileProgressScope)
     if util.nilOrEmpty(pathOrMessage) then
         ErrorHandler.handleError("No filename given. Check logs.", "uploadAsset: pathOrMessage empty")
         return nil
@@ -401,7 +401,7 @@ function ImmichAPI:uploadAsset(pathOrMessage, deviceAssetId, visibility)
 
     local parsedResponse, errReason
     for attempt = 1, 2 do
-        parsedResponse, errReason = self:doMultiPartPostRequest(apiPath, mimeChunks)
+        parsedResponse, errReason = self:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope)
         if parsedResponse then break end
         if attempt == 1 then
             log:warn("uploadAsset: attempt 1 failed: " .. tostring(errReason) .. " — retrying...")
@@ -415,7 +415,7 @@ function ImmichAPI:uploadAsset(pathOrMessage, deviceAssetId, visibility)
     return nil, errReason
 end
 
-function ImmichAPI:replaceAsset(immichId, pathOrMessage, deviceAssetId, visibility)
+function ImmichAPI:replaceAsset(immichId, pathOrMessage, deviceAssetId, visibility, fileProgressScope)
     if util.nilOrEmpty(immichId) then
         ErrorHandler.handleError("Immich asset ID missing. Check logs.", "replaceAsset: immichId empty")
         return nil
@@ -434,7 +434,7 @@ function ImmichAPI:replaceAsset(immichId, pathOrMessage, deviceAssetId, visibili
     -- Upload to regular library first so copy/delete work even when the target
     -- visibility is "locked" (Immich blocks copy and delete on locked assets).
     -- Visibility is applied after metadata is transferred.
-    local newImmichId, errReason = self:uploadAsset(pathOrMessage, deviceAssetId, nil)
+    local newImmichId, errReason = self:uploadAsset(pathOrMessage, deviceAssetId, nil, fileProgressScope)
     if newImmichId ~= nil then
         -- Immich may return the existing asset ID (e.g. duplicate detection); skip replace steps
         if newImmichId == immichId then
@@ -1180,7 +1180,7 @@ function ImmichAPI:doGetRequestAllow404(apiPath)
     return nil, errReason
 end
 
-function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
+function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope)
     if not ensureConnectivity(self) then
         return nil, "No connectivity"
     end
@@ -1188,6 +1188,7 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
     -- Check for a file chunk to build per-file progress tracking.
     local totalSize = 0
     local fileName = ""
+    local ownScope = nil
     for _, chunk in ipairs(mimeChunks) do
         if chunk.filePath and chunk.filePath ~= "" then
             fileName = chunk.fileName or LrPathUtils.leafName(chunk.filePath)
@@ -1197,20 +1198,26 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         end
     end
 
-    local fileProgressScope = nil
     local callbackFn = nil
     if totalSize > 0 then
-        local LrProgressScope = import 'LrProgressScope'
-        fileProgressScope = LrProgressScope({
-            title = "Uploading " .. fileName,
-            caption = "Starting upload...",
-            isCancelable = true,
-        })
+        if not fileProgressScope then
+            local LrProgressScope = import 'LrProgressScope'
+            fileProgressScope = LrProgressScope({
+                title = "Uploading " .. fileName,
+                caption = "Starting upload...",
+                isCancelable = true,
+            })
+            ownScope = fileProgressScope
+        else
+            fileProgressScope:setCaption("Uploading " .. fileName .. " (starting...)")
+        end
+
+        local scopeForCallback = fileProgressScope
         callbackFn = function(progress)
-            fileProgressScope:setPortionComplete(progress * 100, 100)
+            scopeForCallback:setPortionComplete(progress * 100, 100)
             local currentMB = (totalSize * progress) / 1024 / 1024
             local totalMB = totalSize / 1024 / 1024
-            fileProgressScope:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentMB, totalMB, progress * 100))
+            scopeForCallback:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentMB, totalMB, progress * 100))
         end
     end
 
@@ -1223,8 +1230,8 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
         callbackFn
     )
 
-    if fileProgressScope then
-        fileProgressScope:done()
+    if ownScope then
+        ownScope:done()
     end
 
     if not headers then
