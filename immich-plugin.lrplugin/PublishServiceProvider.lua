@@ -22,6 +22,7 @@ return {
         { key = "enableBatching", default = false },
         { key = "batchSize", default = 100 },
         { key = "maxConcurrentUploads", default = 4 },
+        { key = "useCurlUpload", default = false },
     },
 
     small_icon = "icons/logo_small.png",

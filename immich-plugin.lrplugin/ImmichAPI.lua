@@ -1201,12 +1201,200 @@ local function formatETA(seconds)
     return string.format("%dh%02dm", h, m)
 end
 
+function ImmichAPI:doCurlUpload(apiPath, mimeChunks, fileProgressScope)
+    local LrDialogs = import 'LrDialogs'
+    local LrUUID = import 'LrUUID'
+    local LrFileUtils = import 'LrFileUtils'
+    local LrPathUtils = import 'LrPathUtils'
+    local LrTasks = import 'LrTasks'
+
+    -- Find the file chunk for progress tracking.
+    local filePath, fileName, totalSize = nil, "", 0
+    for _, chunk in ipairs(mimeChunks) do
+        if chunk.filePath and chunk.filePath ~= "" then
+            filePath = chunk.filePath
+            fileName = chunk.fileName or LrPathUtils.leafName(filePath)
+            local attrs = LrFileUtils.fileAttributes(filePath)
+            totalSize = attrs and attrs.fileSize or 0
+            break
+        end
+    end
+
+    if not filePath then
+        -- No file chunk; fall back to LrHttp
+        return nil, "No file chunk for curl"
+    end
+
+    -- Create or reuse progress scope
+    local ownScope = nil
+    local scopeForCallback = fileProgressScope
+    if not scopeForCallback then
+        local LrProgressScope = import 'LrProgressScope'
+        scopeForCallback = LrProgressScope({
+            title = "Uploading " .. fileName,
+            caption = "Starting upload...",
+            isCancelable = true,
+        })
+        ownScope = scopeForCallback
+    else
+        scopeForCallback:setCaption(fileName .. " (starting...)")
+    end
+
+    -- Speed tracking
+    local startTime = LrDate.currentTime()
+    local lastBytes = 0
+    local lastTime = startTime
+    local speedEma = nil
+
+    -- Temp files for response and header
+    local tempStdout = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_res_" .. LrUUID.generateUUID() .. ".json")
+    local tempHeader = LrPathUtils.child(LrPathUtils.getStandardFilePath("temp"), "immich_hdr_" .. LrUUID.generateUUID() .. ".txt")
+    local hdrFile = io.open(tempHeader, "w")
+    if hdrFile then
+        hdrFile:write("x-api-key: " .. safeApiKey(self) .. "\n")
+        hdrFile:close()
+    end
+
+    local function escapeShellArg(arg)
+        if MAC_ENV then
+            return "'" .. string.gsub(arg, "'", "'\\''") .. "'"
+        else
+            return '"' .. string.gsub(arg, '"', '\\"') .. '"'
+        end
+    end
+
+    local args = {
+        "curl",
+        "-sS",                               -- silent but show errors
+        "-w", escapeShellArg("\\nHTTP_STATUS:%{http_code}"),
+        "-o", escapeShellArg(tempStdout),
+        "-H", "@" .. escapeShellArg(tempHeader),
+        "-H", escapeShellArg("Accept: application/json"),
+    }
+
+    for _, chunk in ipairs(mimeChunks) do
+        if chunk.filePath then
+            local formValue = chunk.name .. "=@" .. chunk.filePath .. ";filename=" .. (chunk.fileName or LrPathUtils.leafName(chunk.filePath))
+            table.insert(args, "-F " .. escapeShellArg(formValue))
+        else
+            table.insert(args, "-F " .. escapeShellArg(chunk.name .. "=" .. tostring(chunk.value)))
+        end
+    end
+
+    local url = self.url .. self.apiBasePath .. apiPath
+    table.insert(args, escapeShellArg(url))
+
+    local cmd = table.concat(args, " ")
+    if not MAC_ENV then
+        cmd = '"' .. cmd .. '"'
+    end
+    log:trace("Curl upload: " .. cmd)
+
+    local pipe = io.popen(cmd .. " 2>&1")
+    local curlOutputs = {}
+    if pipe then
+        for line in pipe:lines() do
+            table.insert(curlOutputs, line)
+            if scopeForCallback and scopeForCallback:isCanceled() then
+                pipe:close()
+                LrFileUtils.delete(tempStdout)
+                LrFileUtils.delete(tempHeader)
+                if ownScope then ownScope:done() end
+                return nil, "User canceled upload"
+            end
+
+            -- Parse progress from curl -# output: "###... 45.2%"
+            local percent = line:match("(%d+%.?%d*)%%")
+            if percent then
+                local pNum = tonumber(percent)
+                if pNum then
+                    scopeForCallback:setPortionComplete(pNum, 100)
+                    local now = LrDate.currentTime()
+                    local bytes = totalSize * pNum / 100
+                    local elapsed = now - lastTime
+                    if elapsed > 0.1 and bytes > lastBytes then
+                        local instant = (bytes - lastBytes) / elapsed
+                        if speedEma then
+                            speedEma = 0.3 * instant + 0.7 * speedEma
+                        else
+                            speedEma = instant
+                        end
+                        lastBytes = bytes
+                        lastTime = now
+                    end
+                    local currentMB = totalSize * pNum / 100 / 1048576
+                    local totalMB = totalSize / 1048576
+                    local etaStr = (speedEma and pNum > 1) and formatETA(totalSize * (1 - pNum/100) / speedEma) or "—"
+                    scopeForCallback:setCaption(string.format(
+                        "%s  •  %.1f / %.1f MB (%.0f%%)  •  %s  •  %s",
+                        fileName, currentMB, totalMB, pNum,
+                        speedEma and formatSpeed(speedEma) or "—", etaStr
+                    ))
+                end
+            end
+            LrTasks.yield()
+        end
+        pipe:close()
+        LrFileUtils.delete(tempHeader)
+    else
+        LrFileUtils.delete(tempHeader)
+        LrFileUtils.delete(tempStdout)
+        if ownScope then ownScope:done() end
+        return nil, "Failed to execute curl"
+    end
+
+    if ownScope then ownScope:done() end
+
+    -- Parse HTTP status from last line of stdout
+    local httpStatus = 0
+    if curlOutputs and #curlOutputs > 0 then
+        for i = #curlOutputs, 1, -1 do
+            local statusMatch = curlOutputs[i]:match("HTTP_STATUS:(%d+)")
+            if statusMatch then
+                httpStatus = tonumber(statusMatch) or 0
+                break
+            end
+        end
+    end
+
+    -- Read response body from temp file
+    local fh = io.open(tempStdout, "r")
+    if fh then
+        local content = fh:read("*a")
+        fh:close()
+        LrFileUtils.delete(tempStdout)
+        if content and content ~= "" then
+            if httpStatus == 200 or httpStatus == 201 then
+                return safeDecodeJson(content, "curl multipart POST")
+            else
+                local errMsg = string.format("Failed to upload %s.\n\nServer Response (HTTP %s):\n%s",
+                    fileName, tostring(httpStatus), tostring(content))
+                log:error("Curl upload failed: " .. errMsg)
+                return nil, errMsg
+            end
+        end
+    end
+
+    return nil, "Curl completed but response file empty"
+end
+
 function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope)
     if not ensureConnectivity(self) then
         return nil, "No connectivity"
     end
 
-    -- Check for a file chunk to build per-file progress tracking.
+    -- Curl path: true OS-process parallelism, no connection pool limit.
+    -- Enabled via the "Use curl for uploads" checkbox in export/publish settings.
+    local useCurl = _G.prefs and _G.prefs.useCurlUpload
+    if useCurl then
+        local result, err = self:doCurlUpload(apiPath, mimeChunks, fileProgressScope)
+        if result or err ~= "No file chunk for curl" then
+            return result, err
+        end
+        log:warn("curl upload unavailable, falling back to LrHttp")
+    end
+
+    -- Native LrHttp path (default): connection-pooled, ~4 concurrent sockets max.
     local totalSize = 0
     local fileName = ""
     local ownScope = nil

@@ -205,6 +205,16 @@ function SharedDialogSections.getBatchingSection(f, propertyTable)
                     font = "<system/small>",
                 }),
             }),
+            f:row({
+                f:checkbox({
+                    title = "Use curl for uploads",
+                    value = bind("useCurlUpload"),
+                }),
+                f:static_text({
+                    title = "(bypasses connection pool for higher concurrency)",
+                    font = "<system/small>",
+                }),
+            }),
         }),
     }
 end

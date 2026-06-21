@@ -21,6 +21,7 @@ return {
         { key = "enableBatching", default = false },
         { key = "batchSize", default = 100 },
         { key = "maxConcurrentUploads", default = 4 },
+        { key = "useCurlUpload", default = false },
     },
 
     canExportVideo = true,
