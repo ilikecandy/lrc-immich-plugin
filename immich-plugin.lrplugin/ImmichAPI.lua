@@ -1180,6 +1180,27 @@ function ImmichAPI:doGetRequestAllow404(apiPath)
     return nil, errReason
 end
 
+local function formatSpeed(bytesPerSec)
+    if bytesPerSec >= 1048576 then
+        return string.format("%.1f MB/s", bytesPerSec / 1048576)
+    elseif bytesPerSec >= 1024 then
+        return string.format("%.0f KB/s", bytesPerSec / 1024)
+    else
+        return string.format("%.0f B/s", bytesPerSec)
+    end
+end
+
+local function formatETA(seconds)
+    if seconds < 1 then return "<1s" end
+    if seconds < 60 then return string.format("%.0fs", seconds) end
+    local m = math.floor(seconds / 60)
+    local s = math.floor(seconds % 60)
+    if seconds < 3600 then return string.format("%dm%02ds", m, s) end
+    local h = math.floor(seconds / 3600)
+    m = math.floor((seconds % 3600) / 60)
+    return string.format("%dh%02dm", h, m)
+end
+
 function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope)
     if not ensureConnectivity(self) then
         return nil, "No connectivity"
@@ -1213,11 +1234,35 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks, fileProgressScope
         end
 
         local scopeForCallback = fileProgressScope
+        local startTime = LrDate.currentTime()
+        local lastBytes = 0
+        local lastTime = startTime
+        local speedEma = nil  -- exponential moving average, bytes/sec
+
         callbackFn = function(progress)
+            local now = LrDate.currentTime()
+            local bytes = totalSize * progress
+            local elapsed = now - lastTime
+            if elapsed > 0.1 and bytes > lastBytes then
+                local instant = (bytes - lastBytes) / elapsed
+                if speedEma then
+                    speedEma = 0.3 * instant + 0.7 * speedEma  -- smooth out jitter
+                else
+                    speedEma = instant
+                end
+                lastBytes = bytes
+                lastTime = now
+            end
+
             scopeForCallback:setPortionComplete(progress * 100, 100)
-            local currentMB = (totalSize * progress) / 1024 / 1024
-            local totalMB = totalSize / 1024 / 1024
-            scopeForCallback:setCaption(string.format("%.1f MB / %.1f MB (%.1f%%)", currentMB, totalMB, progress * 100))
+            local currentMB = totalSize * progress / 1048576
+            local totalMB = totalSize / 1048576
+            local line = string.format("%.1f / %.1f MB (%.0f%%)  •  %s  •  %s",
+                currentMB, totalMB, progress * 100,
+                speedEma and formatSpeed(speedEma) or "—",
+                speedEma and progress > 0.01 and formatETA(totalSize * (1 - progress) / speedEma) or "—"
+            )
+            scopeForCallback:setCaption(line)
         end
     end
 
