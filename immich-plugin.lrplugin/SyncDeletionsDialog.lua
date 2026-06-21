@@ -308,6 +308,8 @@ return {
 
         -- Dialog UI
         local f = LrView.osFactory()
+        local pendingScan = nil  -- "mobile", "orphans", or nil
+
         local contents = f:column({
             bind_to_object = prefs,
             spacing = f:control_spacing(),
@@ -332,8 +334,8 @@ return {
                         f:push_button({
                             title = "Scan for Mobile Deletions",
                             action = function(button)
-                                -- Dismiss the setup dialog to run the scan task
-                                LrDialogs.closeCurrentModal("scan_mobile")
+                                pendingScan = "mobile"
+                                LrDialogs.closeCurrentModal("ok")
                             end,
                         }),
                     }),
@@ -369,7 +371,8 @@ return {
                         f:push_button({
                             title = "Scan for Server Orphans",
                             action = function(button)
-                                LrDialogs.closeCurrentModal("scan_orphans")
+                                pendingScan = "orphans"
+                                LrDialogs.closeCurrentModal("ok")
                             end,
                         }),
                     }),
@@ -378,16 +381,24 @@ return {
         })
 
         -- Show setup dialog
-        local result = LrDialogs.presentModalDialog({
+        LrDialogs.presentModalDialog({
             title = "Sync & Clean Deletions",
             contents = contents,
             actionVerb = "Close",
         })
 
-        if result == "scan_mobile" then
-            runMobileDeletionsScan()
-        elseif result == "scan_orphans" then
-            runServerOrphansScan(prefs.syncDeletionsAlbum)
+        if pendingScan == "mobile" then
+            local ok, err = LrTasks.pcall(runMobileDeletionsScan)
+            if not ok then
+                log:error("Mobile deletion scan error: " .. tostring(err))
+            end
+        elseif pendingScan == "orphans" then
+            local ok, err = LrTasks.pcall(function()
+                runServerOrphansScan(prefs.syncDeletionsAlbum)
+            end)
+            if not ok then
+                log:error("Server orphans scan error: " .. tostring(err))
+            end
         end
     end)
 }
