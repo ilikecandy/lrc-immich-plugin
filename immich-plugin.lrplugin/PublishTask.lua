@@ -627,6 +627,9 @@ function PublishTask.getCommentsFromPublishedCollection(publishSettings, arrayOf
         return nil
     end
 
+    -- Cache album existence checks — same album checked for every photo
+    local albumExistsCache = {}
+
     for i, photoInfo in ipairs(arrayOfPhotoInfo) do
         -- Get all published Collections where the photo is included.
         local publishedCollections = photoInfo.photo:getContainedPublishedCollections()
@@ -636,7 +639,13 @@ function PublishTask.getCommentsFromPublishedCollection(publishSettings, arrayOf
             -- Check if the published collection is an Immich collection and still exists on the server.
             if string.sub(publishedCollection:getService():getPluginId(), 1, -3) == _PLUGIN.id then
                 log:trace("publishedCollection : " .. publishedCollection:getName() .. " is an Immich collection.")
-                if immich:checkIfAlbumExists(publishedCollection:getRemoteId()) then
+                local remoteId = publishedCollection:getRemoteId()
+                local exists = albumExistsCache[remoteId]
+                if exists == nil then
+                    exists = immich:checkIfAlbumExists(remoteId) or false
+                    albumExistsCache[remoteId] = exists
+                end
+                if exists then
                     log:trace("... and it exists on the server.")
                     -- Get activities for the photo in the published collection.
                     local activities =
