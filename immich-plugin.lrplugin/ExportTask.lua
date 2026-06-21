@@ -443,11 +443,41 @@ local function processSingleRenditionRenditions(
 
     local completedQueue = {}
     local LrProgressScope = import 'LrProgressScope'
-    local fileProgressScope = LrProgressScope({
-        title = "Uploading",
-        caption = "Waiting...",
-        isCancelable = true,
-    })
+
+    -- One persistent progress scope per concurrent upload slot (no create/destroy churn)
+    local fileProgressPool = {}
+    local fileProgressFree = {}
+    for i = 1, maxConcurrentUploads do
+        local scope = LrProgressScope({
+            title = "",
+            caption = "Waiting...",
+            isCancelable = true,
+        })
+        table.insert(fileProgressPool, scope)
+        fileProgressFree[i] = true
+    end
+
+    local function acquireScope()
+        for i, free in ipairs(fileProgressFree) do
+            if free then
+                fileProgressFree[i] = false
+                return fileProgressPool[i]
+            end
+        end
+        return nil
+    end
+
+    local function releaseScope(scope)
+        for i, s in ipairs(fileProgressPool) do
+            if s == scope then
+                fileProgressFree[i] = true
+                scope:setCaption("Waiting...")
+                scope:setPortionComplete(0, 100)
+                return
+            end
+        end
+    end
+
     local batchStartTime = LrDate.currentTime()
 
     -- Process completed uploads on the main thread where SDK catalog mutations are safe.
@@ -556,6 +586,8 @@ local function processSingleRenditionRenditions(
         if success then
             activeUploadsCount = activeUploadsCount + 1
 
+            local uploadScope = acquireScope()
+
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
             local originalFileMode = exportParams.originalFileMode
@@ -579,9 +611,9 @@ local function processSingleRenditionRenditions(
                             local existingId = immich:checkIfAssetExistsEnhanced(photo, deviceAssetId, fileName, dateCreated)
                             local id, errReason
                             if existingId == nil then
-                                id, errReason = immich:uploadAsset(originalPath, deviceAssetId, visibility, fileProgressScope)
+                                id, errReason = immich:uploadAsset(originalPath, deviceAssetId, visibility, uploadScope)
                             else
-                                id, errReason = immich:replaceAsset(existingId, originalPath, deviceAssetId, visibility, fileProgressScope)
+                                id, errReason = immich:replaceAsset(existingId, originalPath, deviceAssetId, visibility, uploadScope)
                             end
                             result.id = id
                             result.errReason = errReason
@@ -595,9 +627,9 @@ local function processSingleRenditionRenditions(
                                     local existingExportId = immich:checkIfAssetExists(deviceAssetIdEdited, fileName, dateCreated)
                                     local exportId
                                     if existingExportId then
-                                        exportId = immich:replaceAsset(existingExportId, pathOrMessage, deviceAssetIdEdited, visibility, fileProgressScope)
+                                        exportId = immich:replaceAsset(existingExportId, pathOrMessage, deviceAssetIdEdited, visibility, uploadScope)
                                     else
-                                        exportId = immich:uploadAsset(pathOrMessage, deviceAssetIdEdited, visibility, fileProgressScope)
+                                        exportId = immich:uploadAsset(pathOrMessage, deviceAssetIdEdited, visibility, uploadScope)
                                     end
                                     if exportId then
                                         result.exportId = exportId
@@ -610,9 +642,9 @@ local function processSingleRenditionRenditions(
                         local existingId = immich:checkIfAssetExistsEnhanced(photo, deviceAssetId, fileName, dateCreated)
                         local id, errReason
                         if existingId == nil then
-                            id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility, fileProgressScope)
+                            id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility, uploadScope)
                         else
-                            id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility, fileProgressScope)
+                            id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility, uploadScope)
                         end
                         result.id = id
                         result.errReason = errReason
@@ -637,6 +669,7 @@ local function processSingleRenditionRenditions(
                         fileName = fileName,
                     })
                 end
+                releaseScope(uploadScope)
                 activeUploadsCount = activeUploadsCount - 1
             end)
         else
@@ -649,7 +682,9 @@ local function processSingleRenditionRenditions(
         drainQueue()
         LrTasks.sleep(0.05)
     end
-    fileProgressScope:done()
+    for _, scope in ipairs(fileProgressPool) do
+        scope:done()
+    end
 end
 
 --------------------------------------------------------------------------------

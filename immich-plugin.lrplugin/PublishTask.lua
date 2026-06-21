@@ -290,11 +290,41 @@ local function processPublishSingleRenditionRenditions(
 
     local completedQueue = {}
     local LrProgressScope = import 'LrProgressScope'
-    local fileProgressScope = LrProgressScope({
-        title = "Uploading",
-        caption = "Waiting...",
-        isCancelable = true,
-    })
+
+    -- One persistent progress scope per concurrent upload slot
+    local fileProgressPool = {}
+    local fileProgressFree = {}
+    for i = 1, maxConcurrentUploads do
+        local scope = LrProgressScope({
+            title = "",
+            caption = "Waiting...",
+            isCancelable = true,
+        })
+        table.insert(fileProgressPool, scope)
+        fileProgressFree[i] = true
+    end
+
+    local function acquireScope()
+        for i, free in ipairs(fileProgressFree) do
+            if free then
+                fileProgressFree[i] = false
+                return fileProgressPool[i]
+            end
+        end
+        return nil
+    end
+
+    local function releaseScope(scope)
+        for i, s in ipairs(fileProgressPool) do
+            if s == scope then
+                fileProgressFree[i] = true
+                scope:setCaption("Waiting...")
+                scope:setPortionComplete(0, 100)
+                return
+            end
+        end
+    end
+
     local batchStartTime = LrDate.currentTime()
 
     local function drainQueue()
@@ -367,6 +397,8 @@ local function processPublishSingleRenditionRenditions(
         if success then
             activeUploadsCount = activeUploadsCount + 1
 
+            local uploadScope = acquireScope()
+
             local photo = rendition.photo
             local deviceAssetId = util.getPhotoDeviceId(photo)
 
@@ -383,11 +415,11 @@ local function processPublishSingleRenditionRenditions(
 
                     local id, errReason
                     if existingId == nil then
-                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility, fileProgressScope)
+                        id, errReason = immich:uploadAsset(pathOrMessage, deviceAssetId, visibility, uploadScope)
                     else
                         -- Always use the current UUID deviceAssetId (not the legacy localIdentifier from the old
                         -- asset) so the new asset can be found by UUID on the next run, breaking the replace cycle.
-                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility, fileProgressScope)
+                        id, errReason = immich:replaceAsset(existingId, pathOrMessage, deviceAssetId, visibility, uploadScope)
                     end
 
                     table.insert(completedQueue, {
@@ -410,6 +442,7 @@ local function processPublishSingleRenditionRenditions(
                         path = pathOrMessage
                     })
                 end
+                releaseScope(uploadScope)
                 activeUploadsCount = activeUploadsCount - 1
             end)
         else
@@ -424,7 +457,9 @@ local function processPublishSingleRenditionRenditions(
         drainQueue()
         LrTasks.sleep(0.05) -- check every 50ms
     end
-    fileProgressScope:done()
+    for _, scope in ipairs(fileProgressPool) do
+        scope:done()
+    end
 end
 
 --------------------------------------------------------------------------------
