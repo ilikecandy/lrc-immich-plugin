@@ -1310,7 +1310,20 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 fileProgressScope:done()
             end
 
-            -- Read response and HTTP code from tempStdout
+            -- Extract HTTP status from curl stdout (where -w writes it).
+            -- The response body is in the temp file (where -o writes it).
+            local httpStatus = 0
+            if curlOutputs and #curlOutputs > 0 then
+                for i = #curlOutputs, 1, -1 do
+                    local statusMatch = curlOutputs[i]:match("HTTP_STATUS:(%d+)")
+                    if statusMatch then
+                        httpStatus = tonumber(statusMatch) or 0
+                        break
+                    end
+                end
+            end
+
+            -- Read response body from temp file
             local fh = io.open(tempStdout, "r")
             if fh then
                 local content = fh:read("*a")
@@ -1319,21 +1332,14 @@ function ImmichAPI:doMultiPartPostRequest(apiPath, mimeChunks)
                 LrFileUtils.delete(tempHeader)
 
                 if content and content ~= "" then
-                    local responseBody, httpStatusStr = content:match("^(.-)HTTP_STATUS:(%d+)$")
-                    if not responseBody then
-                        responseBody = content
-                        httpStatusStr = "0"
-                    end
-                    local httpStatus = tonumber(httpStatusStr) or 0
-
                     if httpStatus == 200 or httpStatus == 201 then
-                        return safeDecodeJson(responseBody, "curl multipart POST")
+                        return safeDecodeJson(content, "curl multipart POST")
                     else
                         local errMsg = string.format(
                             "Failed to upload %s.\n\nServer Response (HTTP %s):\n%s",
                             fileName,
                             tostring(httpStatus),
-                            tostring(responseBody)
+                            tostring(content)
                         )
                         log:error("Curl upload failed: " .. errMsg)
                         return nil, errMsg
