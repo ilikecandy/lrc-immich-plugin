@@ -295,6 +295,7 @@ local function processPublishSingleRenditionRenditions(
         caption = "Waiting...",
         isCancelable = true,
     })
+    local batchStartTime = LrDate.currentTime()
 
     local function drainQueue()
         while #completedQueue > 0 do
@@ -328,6 +329,12 @@ local function processPublishSingleRenditionRenditions(
             state.done = state.done + 1
             progressScope:setPortionComplete(state.done, nPhotos)
             if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
+                local elapsed = LrDate.currentTime() - batchStartTime
+                local itemsPerSec = elapsed > 0 and (state.done / elapsed) or 0
+                progressScope:setCaption(string.format(
+                    "Uploaded %d / %d  •  %.1f/s",
+                    state.done, nPhotos, itemsPerSec
+                ))
                 log:info("Publish progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
             end
 

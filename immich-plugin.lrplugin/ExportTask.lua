@@ -448,6 +448,7 @@ local function processSingleRenditionRenditions(
         caption = "Waiting...",
         isCancelable = true,
     })
+    local batchStartTime = LrDate.currentTime()
 
     -- Process completed uploads on the main thread where SDK catalog mutations are safe.
     local function drainQueue()
@@ -515,6 +516,18 @@ local function processSingleRenditionRenditions(
             state.done = state.done + 1
             progressScope:setPortionComplete(state.done, nPhotos)
             if state.done == 1 or state.done % 10 == 0 or state.done == nPhotos then
+                local elapsed = LrDate.currentTime() - batchStartTime
+                local itemsPerSec = elapsed > 0 and (state.done / elapsed) or 0
+                local remaining = itemsPerSec > 0 and math.floor((nPhotos - state.done) / itemsPerSec) or 0
+                local rStr
+                if remaining < 60 then rStr = remaining .. "s"
+                elseif remaining < 3600 then rStr = string.format("%dm%02ds", math.floor(remaining/60), remaining%60)
+                else rStr = string.format("%dh%02dm", math.floor(remaining/3600), math.floor((remaining%3600)/60))
+                end
+                progressScope:setCaption(string.format(
+                    "Uploaded %d / %d  •  %.1f/s  •  %s left",
+                    state.done, nPhotos, itemsPerSec, rStr
+                ))
                 log:info("Export progress: " .. state.done .. "/" .. nPhotos .. " (" .. math.floor(state.done * 100 / nPhotos) .. "%)")
             end
         end
