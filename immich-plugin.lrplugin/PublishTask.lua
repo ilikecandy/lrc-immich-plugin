@@ -487,7 +487,11 @@ local function runPublishExport(
     local hostUrl = (exportParams and exportParams.url and exportParams.url ~= "") and exportParams.url or "Immich"
     progressScope:setCaption(util.buildSimpleUploadProgressTitle(nPhotos, "Publishing", hostUrl))
 
-    local batches = UploadHelpers.splitIntoBatches(renditions, exportParams)
+    local batchSize = 100
+    if exportParams.enableBatching and exportParams.batchSize and tonumber(exportParams.batchSize) then
+        batchSize = math.max(1, math.floor(tonumber(exportParams.batchSize)))
+    end
+
     local state = UploadHelpers.createUploadState()
 
     local useStacking = exportParams.stackOriginalExport
@@ -496,18 +500,25 @@ local function runPublishExport(
         useStacking = true
     end
 
-    for batchIdx, batch in ipairs(batches) do
-        if progressScope:isCanceled() then
-            break
+    -- Process in batches, releasing rendition references as we go so LR can
+    -- free its internal render cache.
+    for i = 1, nPhotos, batchSize do
+        if progressScope:isCanceled() then break end
+        local batchCount = math.min(batchSize, nPhotos - i + 1)
+        local batch = {}
+        for j = 1, batchCount do
+            local idx = i + j - 1
+            batch[j] = renditions[idx]
+            renditions[idx] = nil
         end
 
-        -- Pre-render next batch's first photos while current batch uploads
-        local nextBatch = batches[batchIdx + 1]
-        if nextBatch then
-            local preRenderCount = math.min(4, #nextBatch)
-            for i = 1, preRenderCount do
+        -- Pre-render next batch's first few photos in background
+        local nextStart = i + batchSize
+        if nextStart <= nPhotos then
+            local preRenderCount = math.min(4, nPhotos - nextStart + 1)
+            for j = 1, preRenderCount do
                 LrTasks.startAsyncTask(function()
-                    nextBatch[i]:waitForRender()
+                    renditions[nextStart + j - 1]:waitForRender()
                 end)
             end
         end
