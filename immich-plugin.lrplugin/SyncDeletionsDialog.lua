@@ -90,7 +90,7 @@ runMobileDeletionsScan = function()
             string.format("Found %d Culled Photos", #culledPhotos),
             string.format(
                 "Found %d photos that were deleted from Immich (e.g. from your mobile phone).\n\n"
-                    .. "Put them into a Lightroom collection named 'Immich Mobile Deleted / Culled' so you can review them?",
+                    .. "Put them into 'Immich Mobile Deleted / Culled' for review?",
                 #culledPhotos
             ),
             "Add to Collection",
