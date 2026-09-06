@@ -350,25 +350,25 @@ end
 -- inside processOnePhotoGroup.
 local function processStackOriginalExportRenditions(
     immich,
-    exportContext,
+    renditionsList,
     progressScope,
     nPhotos,
     exportParams,
     albumId,
     useAlbum,
     editedPhotosCache,
-    visibility
+    visibility,
+    state
 )
-    local failures, stackWarnings = {}, {}
-    local atLeastSomeSuccess = { false }
-    local exportedPrimaryByPhoto = {}
-    local done = 0
-    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+    for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
             break
         end
         local success, pathOrMessage = rendition:waitForRender()
         if progressScope:isCanceled() then
+            if success then
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+            end
             break
         end
         if success then
@@ -380,6 +380,7 @@ local function processStackOriginalExportRenditions(
                 rendition = rendition,
                 role = "export",
             }
+            local successWrapper = { state.atLeastSomeSuccess }
             processOnePhotoGroup(
                 immich,
                 { item },
@@ -387,43 +388,45 @@ local function processStackOriginalExportRenditions(
                 albumId,
                 useAlbum,
                 editedPhotosCache,
-                failures,
-                stackWarnings,
-                atLeastSomeSuccess,
-                exportedPrimaryByPhoto,
+                state.failures,
+                state.stackWarnings,
+                successWrapper,
+                state.exportedPrimaryByPhoto,
                 visibility
             )
+            if successWrapper[1] then
+                state.atLeastSomeSuccess = true
+            end
         end
         -- Advance progress for every rendition, including failed renders, so the bar reaches 100%.
-        done = done + 1
-        progressScope:setPortionComplete(done, nPhotos)
-        if done == 1 or done % 10 == 0 or done == nPhotos then
-            log:info("Export progress: " .. done .. "/" .. nPhotos .. " (" .. math.floor(done * 100 / nPhotos) .. "%)")
-        end
+        state.done = state.done + 1
+        UploadHelpers.updateBatchProgress(progressScope, state.done, nPhotos, "Exported", state.startTime)
     end
-    return failures, stackWarnings, atLeastSomeSuccess[1], exportedPrimaryByPhoto
 end
 
 --------------------------------------------------------------------------------
 -- Single-rendition flow: one loop over renditions.
 local function processSingleRenditionRenditions(
     immich,
-    exportContext,
+    renditionsList,
     progressScope,
     nPhotos,
     exportParams,
     albumId,
     useAlbum,
     editedPhotosCache,
-    visibility
+    visibility,
+    state
 )
-    local failures, stackWarnings = {}, {}
-    local atLeastSomeSuccess = false
-    local exportedPrimaryByPhoto = {}
-    local done = 0
-    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+    local failures = state.failures
+    local stackWarnings = state.stackWarnings
+    local exportedPrimaryByPhoto = state.exportedPrimaryByPhoto
+    for _, rendition in ipairs(renditionsList) do
         local success, pathOrMessage = rendition:waitForRender()
         if progressScope:isCanceled() then
+            if success then
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+            end
             break
         end
         if success then
@@ -450,7 +453,7 @@ local function processSingleRenditionRenditions(
                             photo:getFormattedMetadata("fileName") .. " - " .. (errReason or "Upload failed")
                         )
                     else
-                        atLeastSomeSuccess = true
+                        state.atLeastSomeSuccess = true
                         MetadataTask.setImmichAssetId(photo, id)
                         local primaryId = id
                         if
@@ -516,7 +519,7 @@ local function processSingleRenditionRenditions(
                         photo:getFormattedMetadata("fileName") .. " - " .. (errReason or "Upload failed")
                     )
                 else
-                    atLeastSomeSuccess = true
+                    state.atLeastSomeSuccess = true
                     MetadataTask.setImmichAssetId(photo, id)
                     exportedPrimaryByPhoto[photo.localIdentifier] = { assetId = id, photo = photo }
                     if originalFileMode and originalFileMode ~= "none" then
@@ -547,17 +550,16 @@ local function processSingleRenditionRenditions(
             end
         end
         -- Advance progress for every rendition, including failed renders, so the bar reaches 100%.
-        done = done + 1
-        progressScope:setPortionComplete(done, nPhotos)
-        if done == 1 or done % 10 == 0 or done == nPhotos then
-            log:info("Export progress: " .. done .. "/" .. nPhotos .. " (" .. math.floor(done * 100 / nPhotos) .. "%)")
-        end
+        state.done = state.done + 1
+        UploadHelpers.updateBatchProgress(progressScope, state.done, nPhotos, "Exported", state.startTime)
     end
-    return failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto
 end
 
 --------------------------------------------------------------------------------
 -- Run the appropriate export path and apply LR stacks; return result tables.
+-- Collects renditions once so large jobs can be split into batches that bound
+-- peak temp-disk usage. When batching is disabled this is a single batch and
+-- behavior matches upstream sequential processing.
 local function runExport(
     immich,
     exportContext,
@@ -569,32 +571,63 @@ local function runExport(
     editedPhotosCache,
     visibility
 )
-    local failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto
-    if exportParams.stackOriginalExport then
-        failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto = processStackOriginalExportRenditions(
-            immich,
-            exportContext,
-            progressScope,
-            nPhotos,
-            exportParams,
-            albumId,
-            useAlbum,
-            editedPhotosCache,
-            visibility
-        )
-    else
-        failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto = processSingleRenditionRenditions(
-            immich,
-            exportContext,
-            progressScope,
-            nPhotos,
-            exportParams,
-            albumId,
-            useAlbum,
-            editedPhotosCache,
-            visibility
-        )
+    local renditions = {}
+    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+        table.insert(renditions, rendition)
     end
+    nPhotos = #renditions
+    if nPhotos == 0 then
+        return {}, {}, false, {}
+    end
+
+    local state = UploadHelpers.createUploadState()
+    state.startTime = LrDate.currentTime()
+
+    local batchSize = UploadHelpers.getBatchSize(exportParams, 100)
+    local batches = UploadHelpers.splitIntoBatches(renditions, batchSize)
+    log:info("Export: " .. nPhotos .. " photos in " .. #batches .. " batch(es)")
+
+    for _, batch in ipairs(batches) do
+        if progressScope:isCanceled() then
+            break
+        end
+        if exportParams.stackOriginalExport then
+            processStackOriginalExportRenditions(
+                immich,
+                batch,
+                progressScope,
+                nPhotos,
+                exportParams,
+                albumId,
+                useAlbum,
+                editedPhotosCache,
+                visibility,
+                state
+            )
+        else
+            processSingleRenditionRenditions(
+                immich,
+                batch,
+                progressScope,
+                nPhotos,
+                exportParams,
+                albumId,
+                useAlbum,
+                editedPhotosCache,
+                visibility,
+                state
+            )
+        end
+        -- Release batch references so LR can free its render cache.
+        for i = 1, #batch do
+            batch[i] = nil
+        end
+    end
+
+    local failures = state.failures
+    local stackWarnings = state.stackWarnings
+    local atLeastSomeSuccess = state.atLeastSomeSuccess
+    local exportedPrimaryByPhoto = state.exportedPrimaryByPhoto
     if exportParams.stackLrStacks and next(exportedPrimaryByPhoto) then
         UploadHelpers.applyLrStacksInImmich(immich, exportedPrimaryByPhoto, stackWarnings)
     end
