@@ -57,6 +57,7 @@ end
 
 --------------------------------------------------------------------------------
 -- Add asset to album (publish logic: folder vs collection/existing).
+-- Keeps the albumAssetIds snapshot current so repeat adds in one run skip the API call.
 local function addAssetToPublishAlbum(immich, albumCreationStrategy, albumId, albumAssetIds, assetId, folderName)
     if albumCreationStrategy == "folder" then
         local folderAlbumId = immich:createOrGetAlbumFolderBased(folderName)
@@ -65,6 +66,9 @@ local function addAssetToPublishAlbum(immich, albumCreationStrategy, albumId, al
         end
     elseif albumId and (not albumAssetIds or not Util.table_contains(albumAssetIds, assetId)) then
         immich:addAssetToAlbum(albumId, assetId)
+        if albumAssetIds then
+            table.insert(albumAssetIds, assetId)
+        end
     end
 end
 
@@ -282,7 +286,7 @@ end
 -- inside processPublishOnePhotoGroup (or skipped for orphan safety in publish mode).
 local function processPublishStackOriginalExportRenditions(
     immich,
-    exportContext,
+    renditionsList,
     progressScope,
     nPhotos,
     albumCreationStrategy,
@@ -291,18 +295,18 @@ local function processPublishStackOriginalExportRenditions(
     visibility,
     exportParams,
     editedPhotosCache,
-    allowOrphanOriginals
+    allowOrphanOriginals,
+    state
 )
-    local failures, stackWarnings = {}, {}
-    local atLeastSomeSuccess = { false }
-    local exportedPrimaryByPhoto = {}
-    local done = 0
-    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+    for _, rendition in ipairs(renditionsList) do
         if progressScope:isCanceled() then
             break
         end
         local success, pathOrMessage = rendition:waitForRender()
         if progressScope:isCanceled() then
+            if success then
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+            end
             break
         end
         if success then
@@ -314,51 +318,62 @@ local function processPublishStackOriginalExportRenditions(
                 rendition = rendition,
                 role = "export",
             }
+            local successWrapper = { state.atLeastSomeSuccess }
             processPublishOnePhotoGroup(
                 immich,
                 { item },
                 albumCreationStrategy,
                 albumId,
                 albumAssetIds,
-                failures,
-                stackWarnings,
-                atLeastSomeSuccess,
-                exportedPrimaryByPhoto,
+                state.failures,
+                state.stackWarnings,
+                successWrapper,
+                state.exportedPrimaryByPhoto,
                 visibility,
                 exportParams,
                 editedPhotosCache,
                 allowOrphanOriginals
             )
+            if successWrapper[1] then
+                state.atLeastSomeSuccess = true
+            end
         end
         -- Advance progress for every rendition, including failed renders, so the bar reaches 100%.
-        done = done + 1
-        progressScope:setPortionComplete(done, nPhotos)
-        if done == 1 or done % 10 == 0 or done == nPhotos then
-            log:info("Publish progress: " .. done .. "/" .. nPhotos .. " (" .. math.floor(done * 100 / nPhotos) .. "%)")
-        end
+        state.done = state.done + 1
+        UploadHelpers.updateBatchProgress(progressScope, state.done, nPhotos, "Published", state.startTime)
     end
-    return failures, stackWarnings, atLeastSomeSuccess[1], exportedPrimaryByPhoto
 end
 
 --------------------------------------------------------------------------------
 local function processPublishSingleRenditionRenditions(
     immich,
-    exportContext,
+    renditionsList,
     progressScope,
     nPhotos,
     exportParams,
     albumCreationStrategy,
     albumId,
     albumAssetIds,
-    visibility
+    visibility,
+    state
 )
-    local failures, stackWarnings = {}, {}
-    local atLeastSomeSuccess = false
-    local exportedPrimaryByPhoto = {}
-    local done = 0
-    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+    -- O(1) album membership: upstream fetched albumAssetIds once but checked
+    -- with linear table_contains per photo. Build a set once here.
+    local albumIdSet = nil
+    if albumAssetIds then
+        albumIdSet = {}
+        for _, existingId in ipairs(albumAssetIds) do
+            albumIdSet[existingId] = true
+        end
+    end
+    local failures = state.failures
+    local exportedPrimaryByPhoto = state.exportedPrimaryByPhoto
+    for _, rendition in ipairs(renditionsList) do
         local success, pathOrMessage = rendition:waitForRender()
         if progressScope:isCanceled() then
+            if success then
+                UploadHelpers.safeDeleteTempFile(pathOrMessage)
+            end
             break
         end
         if success then
@@ -378,7 +393,7 @@ local function processPublishSingleRenditionRenditions(
                     photo:getFormattedMetadata("fileName") .. " (" .. (errReason or "Upload failed") .. ")"
                 )
             else
-                atLeastSomeSuccess = true
+                state.atLeastSomeSuccess = true
                 MetadataTask.setImmichAssetId(photo, id)
                 rendition:recordPublishedPhotoId(id)
                 rendition:recordPublishedPhotoUrl(immich:getAssetUrl(id))
@@ -390,21 +405,67 @@ local function processPublishSingleRenditionRenditions(
                         immich:addAssetToAlbum(folderBasedAlbumId, id)
                     end
                 else
-                    if albumId and (not albumAssetIds or not Util.table_contains(albumAssetIds, id)) then
+                    if albumId and (not albumIdSet or not albumIdSet[id]) then
                         immich:addAssetToAlbum(albumId, id)
+                        if albumIdSet then
+                            albumIdSet[id] = true
+                        end
                     end
                 end
             end
             UploadHelpers.safeDeleteTempFile(pathOrMessage)
         end
         -- Advance progress for every rendition, including failed renders, so the bar reaches 100%.
-        done = done + 1
-        progressScope:setPortionComplete(done, nPhotos)
-        if done == 1 or done % 10 == 0 or done == nPhotos then
-            log:info("Publish progress: " .. done .. "/" .. nPhotos .. " (" .. math.floor(done * 100 / nPhotos) .. "%)")
+        state.done = state.done + 1
+        UploadHelpers.updateBatchProgress(progressScope, state.done, nPhotos, "Published", state.startTime)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Prompt once when a subset of pending photos is selected in the grid:
+-- publish only the selection or everything. Uses removePhoto before the slow
+-- render iterator so deselected photos never enter Preparing/Rendering.
+-- Returns false when the user cancels the whole run.
+local function filterPublishSelection(exportSession, nPhotos)
+    local ok, catalog = LrTasks.pcall(function()
+        return LrApplication.activeCatalog()
+    end)
+    if not ok or not catalog then
+        return true
+    end
+    local selectedPhotos = catalog:getTargetPhotos()
+    if not selectedPhotos or #selectedPhotos == 0 or #selectedPhotos >= nPhotos then
+        return true
+    end
+    local result = LrDialogs.confirm(
+        "Publish Selection or All?",
+        "You have "
+            .. #selectedPhotos
+            .. " pending photos selected in your grid.\n"
+            .. "Would you like to publish only these selected photos, or publish all "
+            .. nPhotos
+            .. " pending photos in the collection?",
+        "Publish Selected (" .. #selectedPhotos .. ")",
+        "Cancel",
+        "Publish All (" .. nPhotos .. ")"
+    )
+    if result == "cancel" then
+        for photo in exportSession:photosToExport() do
+            exportSession:removePhoto(photo)
+        end
+        return false
+    elseif result == "ok" then
+        local selectedMap = {}
+        for _, photo in ipairs(selectedPhotos) do
+            selectedMap[photo.localIdentifier] = true
+        end
+        for photo in exportSession:photosToExport() do
+            if not selectedMap[photo.localIdentifier] then
+                exportSession:removePhoto(photo)
+            end
         end
     end
-    return failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -428,11 +489,30 @@ local function runPublishExport(
         useStacking = true
     end
 
-    if useStacking then
-        failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto =
+    local renditions = {}
+    for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
+        table.insert(renditions, rendition)
+    end
+    nPhotos = #renditions
+    if nPhotos == 0 then
+        return {}, {}, false, {}
+    end
+
+    local state = UploadHelpers.createUploadState()
+    state.startTime = LrDate.currentTime()
+
+    local batchSize = UploadHelpers.getBatchSize(exportParams, 100)
+    local batches = UploadHelpers.splitIntoBatches(renditions, batchSize)
+    log:info("Publish: " .. nPhotos .. " photos in " .. #batches .. " batch(es)")
+
+    for _, batch in ipairs(batches) do
+        if progressScope:isCanceled() then
+            break
+        end
+        if useStacking then
             processPublishStackOriginalExportRenditions(
                 immich,
-                exportContext,
+                batch,
                 progressScope,
                 nPhotos,
                 albumCreationStrategy,
@@ -441,21 +521,32 @@ local function runPublishExport(
                 visibility,
                 exportParams,
                 editedPhotosCache,
-                allowOrphanOriginals
+                allowOrphanOriginals,
+                state
             )
-    else
-        failures, stackWarnings, atLeastSomeSuccess, exportedPrimaryByPhoto = processPublishSingleRenditionRenditions(
-            immich,
-            exportContext,
-            progressScope,
-            nPhotos,
-            exportParams,
-            albumCreationStrategy,
-            albumId,
-            albumAssetIds,
-            visibility
-        )
+        else
+            processPublishSingleRenditionRenditions(
+                immich,
+                batch,
+                progressScope,
+                nPhotos,
+                exportParams,
+                albumCreationStrategy,
+                albumId,
+                albumAssetIds,
+                visibility,
+                state
+            )
+        end
+        for i = 1, #batch do
+            batch[i] = nil
+        end
     end
+
+    failures = state.failures
+    stackWarnings = state.stackWarnings
+    atLeastSomeSuccess = state.atLeastSomeSuccess
+    exportedPrimaryByPhoto = state.exportedPrimaryByPhoto
     if exportParams.stackLrStacks and next(exportedPrimaryByPhoto) then
         UploadHelpers.applyLrStacksInImmich(immich, exportedPrimaryByPhoto, stackWarnings)
     end
@@ -474,6 +565,15 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
     local albumCreationStrategy, albumId, albumAssetIds = resolvePublishAlbum(immich, exportContext)
 
     local nPhotos = exportSession:countRenditions()
+    -- Offer selected-vs-all before the slow render iterator; deselected photos
+    -- are removed so they never enter Preparing/Rendering.
+    if not filterPublishSelection(exportSession, nPhotos) then
+        return nil
+    end
+    nPhotos = exportSession:countRenditions()
+    if nPhotos == 0 then
+        return nil
+    end
     log:info(
         "=== Publish START: "
             .. nPhotos
