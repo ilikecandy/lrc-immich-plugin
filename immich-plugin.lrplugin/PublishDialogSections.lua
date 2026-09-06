@@ -14,6 +14,7 @@ function PublishDialogSections.sectionsForTopOfDialog(f, propertyTable)
     local result = {
         SharedDialogSections.getOriginalFilesSection(f, propertyTable),
         SharedDialogSections.getLockedFolderSection(f, propertyTable),
+        SharedDialogSections.getPerformanceSection(f, propertyTable),
         SharedDialogSections.getServerConnectionSection(f, propertyTable),
     }
 

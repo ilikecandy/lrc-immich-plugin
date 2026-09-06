@@ -124,6 +124,93 @@ function SharedDialogSections.getLockedFolderSection(f, propertyTable)
     }
 end
 
+-- Generate the Shared 'Performance' dialog section (batching + concurrency).
+-- Batching bounds peak temp-disk usage on large jobs; concurrency allows
+-- overlapping network uploads (default 1 = sequential, upstream behavior).
+function SharedDialogSections.getPerformanceSection(f, propertyTable)
+    local bind = LrView.bind
+    local share = LrView.share
+
+    return {
+        title = "Performance",
+        bind_to_object = propertyTable,
+        f:column({
+            spacing = f:control_spacing(),
+            f:row({
+                margin_bottom = 5,
+                f:static_text({
+                    title = "For large collections, batching in smaller groups"
+                        .. "\nprevents disk space exhaustion and preserves progress if interrupted.",
+                    alignment = "left",
+                    font = "<system/small>",
+                }),
+            }),
+            f:row({
+                f:static_text({
+                    title = "Batching:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:checkbox({
+                    title = "Enable batching",
+                    value = bind("enableBatching"),
+                }),
+            }),
+            f:row({
+                f:static_text({
+                    title = "Batch size:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:edit_field({
+                    value = bind("batchSize"),
+                    enabled = bind("enableBatching"),
+                    width_in_chars = 6,
+                    precision = 0,
+                    min = 1,
+                    max = 10000,
+                    validate = function(_, val)
+                        local num = tonumber(val)
+                        if not num or num < 1 then
+                            return false, 100, "Batch size must be a positive integer."
+                        end
+                        return true, math.floor(num)
+                    end,
+                }),
+                f:static_text({
+                    title = "photos per batch",
+                    font = "<system/small>",
+                }),
+            }),
+            f:row({
+                f:static_text({
+                    title = "Concurrent uploads:",
+                    alignment = "right",
+                    width = share("labelWidth"),
+                }),
+                f:edit_field({
+                    value = bind("maxConcurrentUploads"),
+                    width_in_chars = 6,
+                    precision = 0,
+                    min = 1,
+                    max = 8,
+                    validate = function(_, val)
+                        local num = tonumber(val)
+                        if not num or num < 1 then
+                            return false, 1, "Concurrent uploads must be between 1 and 8."
+                        end
+                        return true, math.min(8, math.max(1, math.floor(num)))
+                    end,
+                }),
+                f:static_text({
+                    title = "simultaneous uploads (1 = sequential)",
+                    font = "<system/small>",
+                }),
+            }),
+        }),
+    }
+end
+
 -- Generate the Shared 'Immich Server connection' dialog section
 function SharedDialogSections.getServerConnectionSection(f, propertyTable)
     local bind = LrView.bind

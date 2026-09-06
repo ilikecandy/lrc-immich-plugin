@@ -20,6 +20,7 @@ function ExportDialogSections.sectionsForBottomOfDialog(f, propertyTable)
 
         SharedDialogSections.getOriginalFilesSection(f, propertyTable),
         SharedDialogSections.getLockedFolderSection(f, propertyTable),
+        SharedDialogSections.getPerformanceSection(f, propertyTable),
         SharedDialogSections.getServerConnectionSection(f, propertyTable),
     }
 
