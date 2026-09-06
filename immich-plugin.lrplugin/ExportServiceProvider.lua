@@ -20,7 +20,6 @@ return {
         { key = "lockedFolderMode", default = "none" },
         { key = "enableBatching", default = false },
         { key = "batchSize", default = 100 },
-        { key = "maxConcurrentUploads", default = 1 },
     },
 
     canExportVideo = true,

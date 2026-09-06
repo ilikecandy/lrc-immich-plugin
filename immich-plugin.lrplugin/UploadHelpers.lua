@@ -55,17 +55,6 @@ function UploadHelpers.splitIntoBatches(list, batchSize)
 end
 
 --------------------------------------------------------------------------------
--- Clamp concurrent uploads to 1..8. Default 1 = sequential (upstream behavior).
-function UploadHelpers.getMaxConcurrency(exportParams, defaultN)
-    local fallback = defaultN or 1
-    local n = exportParams and tonumber(exportParams.maxConcurrentUploads) or nil
-    if not n then
-        return fallback
-    end
-    return math.min(8, math.max(1, math.floor(n)))
-end
-
---------------------------------------------------------------------------------
 -- Single progress caption: counts + throughput + ETA. Call from the main thread
 -- after each completed item (including failed renders so the bar hits 100%).
 function UploadHelpers.updateBatchProgress(progressScope, done, total, prefix, startTime)
