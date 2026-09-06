@@ -972,18 +972,17 @@ function ImmichAPI:getAlbumAssetIds(albumId)
         log:warn("getAlbumAssetIds: albumId empty")
         return {}
     end
-    log:trace("ImmichAPI: getAlbumAssetIds for: " .. tostring(albumId))
-    local albumInfo = self:doGetRequest("/albums/" .. albumId)
+    -- Immich 3.0 removed assets from GET /albums/{id}; reuse the paginated
+    -- search/metadata path so publish sync works on old and new servers.
+    local assets = self:getAlbumAssets(albumId)
     local assetIds = {}
-
-    if albumInfo and albumInfo.assets then
-        for i = 1, #albumInfo.assets do
-            if albumInfo.assets[i] and albumInfo.assets[i].id then
-                table.insert(assetIds, albumInfo.assets[i].id)
+    if assets then
+        for _, asset in ipairs(assets) do
+            if asset and asset.id then
+                table.insert(assetIds, asset.id)
             end
         end
     end
-
     return assetIds
 end
 
