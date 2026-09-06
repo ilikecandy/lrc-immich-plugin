@@ -12,6 +12,92 @@ require("StackManager")
 UploadHelpers = {}
 
 --------------------------------------------------------------------------------
+-- Batching helpers: split a rendition list into chunks so large jobs bound
+-- peak temp-disk usage and preserve progress across interruption.
+-- Returns a list of batches; when batching is disabled returns one batch.
+function UploadHelpers.createUploadState()
+    return {
+        done = 0,
+        failures = {},
+        stackWarnings = {},
+        atLeastSomeSuccess = false,
+        exportedPrimaryByPhoto = {},
+    }
+end
+
+function UploadHelpers.getBatchSize(exportParams, defaultSize)
+    local fallback = defaultSize or 100
+    if not exportParams or not exportParams.enableBatching then
+        return nil -- nil = single batch (no chunking)
+    end
+    local n = tonumber(exportParams.batchSize)
+    if not n or n < 1 then
+        return fallback
+    end
+    return math.max(1, math.floor(n))
+end
+
+function UploadHelpers.splitIntoBatches(list, batchSize)
+    local batches = {}
+    local n = #list
+    if n == 0 then
+        return batches
+    end
+    local size = batchSize and math.max(1, math.floor(batchSize)) or n
+    for i = 1, n, size do
+        local batch = {}
+        for j = i, math.min(i + size - 1, n) do
+            table.insert(batch, list[j])
+        end
+        table.insert(batches, batch)
+    end
+    return batches
+end
+
+--------------------------------------------------------------------------------
+-- Clamp concurrent uploads to 1..8. Default 1 = sequential (upstream behavior).
+function UploadHelpers.getMaxConcurrency(exportParams, defaultN)
+    local fallback = defaultN or 1
+    local n = exportParams and tonumber(exportParams.maxConcurrentUploads) or nil
+    if not n then
+        return fallback
+    end
+    return math.min(8, math.max(1, math.floor(n)))
+end
+
+--------------------------------------------------------------------------------
+-- Single progress caption: counts + throughput + ETA. Call from the main thread
+-- after each completed item (including failed renders so the bar hits 100%).
+function UploadHelpers.updateBatchProgress(progressScope, done, total, prefix, startTime)
+    if not progressScope then
+        return
+    end
+    progressScope:setPortionComplete(done, total)
+    if not (done == 1 or done % 10 == 0 or done == total) then
+        return
+    end
+    local caption
+    if startTime and done > 0 then
+        local elapsed = math.max(0.1, LrDate.currentTime() - startTime)
+        local perSec = done / elapsed
+        local remaining = perSec > 0 and math.floor((total - done) / perSec) or 0
+        local eta
+        if remaining < 60 then
+            eta = remaining .. "s"
+        elseif remaining < 3600 then
+            eta = string.format("%dm%02ds", math.floor(remaining / 60), remaining % 60)
+        else
+            eta = string.format("%dh%02dm", math.floor(remaining / 3600), math.floor((remaining % 3600) / 60))
+        end
+        caption = string.format("%s %d / %d  -  %.1f/s  -  %s left", prefix or "Uploaded", done, total, perSec, eta)
+    else
+        caption = string.format("%s %d / %d", prefix or "Uploaded", done, total)
+    end
+    progressScope:setCaption(caption)
+    log:info("Progress: " .. done .. "/" .. total .. " (" .. math.floor(done * 100 / total) .. "%)")
+end
+
+--------------------------------------------------------------------------------
 -- Delete a temporary file; never throws. Call after each upload so temp files
 -- do not remain on early cancel or error.
 function UploadHelpers.safeDeleteTempFile(path)
