@@ -803,7 +803,7 @@ return {
             spacing = f:control_spacing(),
             margin = 15,
             f:group_box({
-                title = "1. Mobile Culling Sync (Server to Lightroom)",
+                title = "1. Mobile Culling (Server to Lightroom)",
                 fill_horizontal = 1,
                 f:column({
                     spacing = f:control_spacing(),
@@ -813,12 +813,16 @@ return {
                             .. "Matches are placed in 'Immich Mobile Deleted / Culled' for review.",
                         alignment = "left",
                         font = "<system/small>",
+                        width = 560,
                         fill_horizontal = 1,
                     }),
                     f:row({
                         margin_top = 10,
+                        fill_horizontal = 1,
                         f:push_button({
                             title = "Scan for Mobile Deletions",
+                            width = 200,
+                            text_color = LrColor(0.1, 0.1, 0.1),
                             action = function()
                                 pendingScan = "mobile"
                                 LrDialogs.closeCurrentModal("ok")
@@ -828,7 +832,7 @@ return {
                 }),
             }),
             f:group_box({
-                title = "2. Clean Server Orphans (Lightroom to Server)",
+                title = "2. Server Orphans (Lightroom to Server)",
                 fill_horizontal = 1,
                 f:column({
                     spacing = f:control_spacing(),
@@ -838,10 +842,12 @@ return {
                             .. "phone uploads in the same albums also appear here.",
                         alignment = "left",
                         font = "<system/small>",
+                        width = 560,
                         fill_horizontal = 1,
                     }),
                     f:row({
                         margin_top = 10,
+                        fill_horizontal = 1,
                         f:static_text({
                             title = "Album to audit:",
                             alignment = "right",
@@ -854,6 +860,8 @@ return {
                         }),
                         f:push_button({
                             title = "Scan for Server Orphans",
+                            width = 200,
+                            text_color = LrColor(0.1, 0.1, 0.1),
                             action = function()
                                 pendingScan = "orphans"
                                 LrDialogs.closeCurrentModal("ok")
@@ -863,7 +871,7 @@ return {
                 }),
             }),
             f:group_box({
-                title = "3. Repair Immich Dates (Lightroom to Server)",
+                title = "3. Repair Dates (Lightroom to Server)",
                 fill_horizontal = 1,
                 f:column({
                     spacing = f:control_spacing(),
@@ -874,12 +882,16 @@ return {
                             .. "or on every uploaded photo when nothing is selected.",
                         alignment = "left",
                         font = "<system/small>",
+                        width = 560,
                         fill_horizontal = 1,
                     }),
                     f:row({
                         margin_top = 10,
+                        fill_horizontal = 1,
                         f:push_button({
                             title = "Repair Dates",
+                            width = 200,
+                            text_color = LrColor(0.1, 0.1, 0.1),
                             action = function()
                                 pendingScan = "dates"
                                 LrDialogs.closeCurrentModal("ok")
