@@ -564,7 +564,6 @@ local function runExport(
     immich,
     exportContext,
     progressScope,
-    nPhotos,
     exportParams,
     albumId,
     useAlbum,
@@ -575,8 +574,8 @@ local function runExport(
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
         table.insert(renditions, rendition)
     end
-    nPhotos = #renditions
-    if nPhotos == 0 then
+    local renditionCount = #renditions
+    if renditionCount == 0 then
         return {}, {}, false, {}
     end
 
@@ -585,7 +584,7 @@ local function runExport(
 
     local batchSize = UploadHelpers.getBatchSize(exportParams, 100)
     local batches = UploadHelpers.splitIntoBatches(renditions, batchSize)
-    log:info("Export: " .. nPhotos .. " photos in " .. #batches .. " batch(es)")
+    log:info("Export: " .. renditionCount .. " photos in " .. #batches .. " batch(es)")
 
     for _, batch in ipairs(batches) do
         if progressScope:isCanceled() then
@@ -596,7 +595,7 @@ local function runExport(
                 immich,
                 batch,
                 progressScope,
-                nPhotos,
+                renditionCount,
                 exportParams,
                 albumId,
                 useAlbum,
@@ -609,7 +608,7 @@ local function runExport(
                 immich,
                 batch,
                 progressScope,
-                nPhotos,
+                renditionCount,
                 exportParams,
                 albumId,
                 useAlbum,
@@ -692,17 +691,8 @@ function ExportTask.processRenderedPhotos(functionContext, exportContext)
     local visibility = resolveLockedFolder(exportParams)
     local editedPhotosCache = getEditedPhotosCacheIfNeeded(exportParams)
 
-    local failures, stackWarnings, atLeastSomeSuccess, _ = runExport(
-        immich,
-        exportContext,
-        progressScope,
-        nPhotos,
-        exportParams,
-        albumId,
-        useAlbum,
-        editedPhotosCache,
-        visibility
-    )
+    local failures, stackWarnings, atLeastSomeSuccess, _ =
+        runExport(immich, exportContext, progressScope, exportParams, albumId, useAlbum, editedPhotosCache, visibility)
     progressScope:done()
 
     log:info(

@@ -758,7 +758,6 @@ local function runPublishExport(
     immich,
     exportContext,
     progressScope,
-    nPhotos,
     exportParams,
     albumCreationStrategy,
     albumId,
@@ -779,8 +778,8 @@ local function runPublishExport(
     for _, rendition in exportContext:renditions({ stopIfCanceled = true }) do
         table.insert(renditions, rendition)
     end
-    nPhotos = #renditions
-    if nPhotos == 0 then
+    local renditionCount = #renditions
+    if renditionCount == 0 then
         return {}, {}, false, {}
     end
 
@@ -789,7 +788,7 @@ local function runPublishExport(
 
     local batchSize = UploadHelpers.getBatchSize(exportParams, 100)
     local batches = UploadHelpers.splitIntoBatches(renditions, batchSize)
-    log:info("Publish: " .. nPhotos .. " photos in " .. #batches .. " batch(es)")
+    log:info("Publish: " .. renditionCount .. " photos in " .. #batches .. " batch(es)")
 
     for _, batch in ipairs(batches) do
         if progressScope:isCanceled() then
@@ -800,7 +799,7 @@ local function runPublishExport(
                 immich,
                 batch,
                 progressScope,
-                nPhotos,
+                renditionCount,
                 albumCreationStrategy,
                 albumId,
                 albumAssetIds,
@@ -816,7 +815,7 @@ local function runPublishExport(
                 immich,
                 batch,
                 progressScope,
-                nPhotos,
+                renditionCount,
                 exportParams,
                 albumCreationStrategy,
                 albumId,
@@ -923,7 +922,6 @@ function PublishTask.processRenderedPhotos(functionContext, exportContext)
         immich,
         exportContext,
         progressScope,
-        nPhotos,
         exportParams,
         albumCreationStrategy,
         albumId,
