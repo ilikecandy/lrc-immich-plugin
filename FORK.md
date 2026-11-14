@@ -21,10 +21,11 @@ This repository is a fork of [bmachek/lrc-immich-plugin](https://github.com/bmac
   - *Clean Server Orphans* (Lightroom → server): finds assets in an album (or all albums)
     that no catalog photo references, and trashes them after confirmation. Assets recorded
     by any Immich publish collection are treated as referenced.
-  - *Repair Immich Dates* (Lightroom → server): sets every recorded asset's date to the
-    capture date Lightroom shows — for the selected photos, or for the whole catalog when
-    nothing is selected. Use it once after upgrading to fix assets uploaded with the old
-    upload-date behavior; it covers every per-service asset.
+  - *Repair Immich Dates* (Lightroom → server): reads each asset's current date, previews
+    every change (filename, current date → Lightroom date) and asks for confirmation before
+    writing. Runs on the selected photos, or on the whole catalog when nothing is selected.
+    Use it once after upgrading to fix assets uploaded with the old upload-date behavior; it
+    covers every per-service asset.
 - **Immich 3.0 album compatibility** — album asset IDs are resolved through the paginated
   `search/metadata` endpoint, because `GET /albums/{id}` no longer returns assets.
 - **O(1) album membership** — publish builds a set of album asset IDs instead of a linear

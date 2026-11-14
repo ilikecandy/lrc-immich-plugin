@@ -996,6 +996,34 @@ function ImmichAPI:getAssetPresence(assetId)
     return nil, "HTTP " .. tostring(headers.status)
 end
 
+-- Single-request GET for bulk scans that already checked connectivity once.
+-- Returns the decoded asset table and "ok", or nil and "gone" (400/404) /
+-- "error" (network or server failure).
+function ImmichAPI:getAssetForScan(assetId)
+    if Util.nilOrEmpty(assetId) then
+        return nil, "gone"
+    end
+    local apiPath = "/assets/" .. tostring(assetId)
+    logRequestStart(self, "GET", apiPath)
+    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders())
+    if not headers then
+        log:error("ImmichAPI getAssetForScan: no response headers: " .. apiPath)
+        return nil, "error"
+    end
+    if headers.status == SUCCESS_STATUS_GET then
+        local decoded = safeDecodeJson(response, "getAssetForScan")
+        if type(decoded) == "table" then
+            return decoded, "ok"
+        end
+        return nil, "error"
+    end
+    if headers.status == 404 or headers.status == 400 then
+        return nil, "gone"
+    end
+    log:error("ImmichAPI getAssetForScan: HTTP " .. tostring(headers.status) .. ": " .. apiPath)
+    return nil, "error"
+end
+
 function ImmichAPI:checkIfAlbumExists(albumId)
     if Util.nilOrEmpty(albumId) then
         return false

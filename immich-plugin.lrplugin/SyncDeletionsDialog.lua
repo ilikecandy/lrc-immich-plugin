@@ -446,10 +446,117 @@ runServerOrphansScan = function(syncDeletionsAlbum)
 end
 
 --------------------------------------------------------------------------------
+-- Normalize an ISO date to "YYYY-MM-DD HH:MM:SS" for comparison and display.
+-- Immich's localDateTime is a timezone-agnostic wall clock and Lightroom's
+-- captureTimeForImmich is zoned; the wall-clock components are what both apps
+-- show, so compare those. Returns nil when the value has no usable date.
+local function dateKey(value)
+    if Util.nilOrEmpty(value) then
+        return nil
+    end
+    local s = tostring(value)
+    local y, mo, d, h, mi, sec = s:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):?(%d*)")
+    if not y then
+        return nil
+    end
+    return string.format("%s-%s-%s %s:%s:%s", y, mo, d, h, mi, (sec ~= "" and sec) or "00")
+end
+
+--------------------------------------------------------------------------------
+-- Human-readable list of the assets the date repair skipped.
+local function skippedSummary(stats)
+    local parts = {}
+    if stats.correct > 0 then
+        table.insert(parts, stats.correct .. " already correct")
+    end
+    if stats.missing > 0 then
+        table.insert(parts, stats.missing .. " missing")
+    end
+    if stats.trashed > 0 then
+        table.insert(parts, stats.trashed .. " trashed")
+    end
+    if stats.unreadable > 0 then
+        table.insert(parts, stats.unreadable .. " unreadable")
+    end
+    if stats.noDate > 0 then
+        table.insert(parts, stats.noDate .. " without a Lightroom date")
+    end
+    if #parts == 0 then
+        return ""
+    end
+    return "Skipped: " .. table.concat(parts, ", ") .. "."
+end
+
+--------------------------------------------------------------------------------
+-- Confirmation dialog listing the changes (filename, current date, new date)
+-- before anything is written. Shows the first 100 changes.
+local function confirmDateChanges(changes, changedPhotos, stats)
+    local f = LrView.osFactory()
+    local previewLimit = 100
+    local rows = {
+        f:row({
+            f:static_text({ title = "Photo", width = 230, font = "<system/bold>" }),
+            f:static_text({ title = "Current date", width = 160, font = "<system/bold>" }),
+            f:static_text({ title = "", width = 24 }),
+            f:static_text({ title = "Lightroom date", width = 160, font = "<system/bold>" }),
+        }),
+    }
+    for i = 1, math.min(#changes, previewLimit) do
+        local change = changes[i]
+        table.insert(
+            rows,
+            f:row({
+                f:static_text({ title = change.filename, width = 230 }),
+                f:static_text({ title = change.from, width = 160 }),
+                f:static_text({ title = "->", width = 24 }),
+                f:static_text({ title = change.to, width = 160 }),
+            })
+        )
+    end
+
+    local views = {
+        f:static_text({
+            title = string.format("Will update the date on %d asset(s) for %d photo(s).", #changes, changedPhotos),
+            font = "<system/bold>",
+        }),
+        f:scrolled_view({
+            width = 600,
+            height = 300,
+            f:column(rows),
+        }),
+    }
+    if #changes > previewLimit then
+        table.insert(
+            views,
+            f:static_text({
+                title = string.format(
+                    "and %d more (cancel and narrow the selection to review the rest).",
+                    #changes - previewLimit
+                ),
+                font = "<system/small>",
+            })
+        )
+    end
+    local skipped = skippedSummary(stats)
+    if skipped ~= "" then
+        table.insert(views, f:static_text({ title = skipped, font = "<system/small>" }))
+    end
+
+    local result = LrDialogs.presentModalDialog({
+        title = "Repair Immich Dates",
+        contents = f:column(views),
+        actionVerb = "Repair Dates",
+        cancelVerb = "Cancel",
+    })
+    return result == "ok"
+end
+
+--------------------------------------------------------------------------------
 -- Lightroom -> Server: set each known asset's capture date to the date Lightroom
 -- shows. Files without EXIF (screenshots, social-media downloads) used to be
 -- uploaded on their upload date; this repairs them, including every per-service
--- asset recorded for a photo.
+-- asset recorded for a photo. Current dates are read and shown for confirmation
+-- before anything is written.
 runDateRepairScan = function()
     LrTasks.startAsyncTask(function()
         local catalog = LrApplication.activeCatalog()
@@ -514,49 +621,143 @@ runDateRepairScan = function()
             return
         end
 
-        local updatedAssets, updatedPhotos, failedAssets = 0, 0, 0
-        for i, entry in ipairs(candidates) do
+        -- Preview first: read each asset's current date and compare it with the
+        -- date Lightroom shows. Nothing is written until the user confirms.
+        local changes = {}
+        local changedPhotoIds = {}
+        local stats = { correct = 0, trashed = 0, missing = 0, unreadable = 0, noDate = 0 }
+        local totalAssets = 0
+        for _, entry in ipairs(candidates) do
+            totalAssets = totalAssets + #entry.ids
+        end
+
+        local checked = 0
+        for _, entry in ipairs(candidates) do
             if progressScope:isCanceled() then
                 break
             end
-            if i == 1 or i % 10 == 0 or i == #candidates then
-                progressScope:setPortionComplete(i, #candidates)
-                progressScope:setCaption(string.format("Repairing dates: %d / %d...", i, #candidates))
-            end
 
             local isoDate = UploadHelpers.captureTimeForImmich(entry.photo)
-            if Util.nilOrEmpty(isoDate) then
-                failedAssets = failedAssets + #entry.ids
-                log:warn(
-                    "Date repair: no Lightroom capture date for "
-                        .. tostring(entry.photo:getFormattedMetadata("fileName"))
-                )
+            local targetKey = dateKey(isoDate)
+            local isVideo = entry.photo:getRawMetadata("fileFormat") == "VIDEO"
+            if not targetKey then
+                stats.noDate = stats.noDate + #entry.ids
+                checked = checked + #entry.ids
+                if checked == totalAssets then
+                    progressScope:setPortionComplete(checked, totalAssets)
+                end
             else
-                local anyUpdated = false
                 for _, assetId in ipairs(entry.ids) do
-                    if immich:setAssetDate(assetId, isoDate, { skipConnectivityCheck = true }) then
-                        updatedAssets = updatedAssets + 1
-                        anyUpdated = true
-                        -- Changing a video date invalidates its thumbnail; queue a rebuild.
-                        if entry.photo:getRawMetadata("fileFormat") == "VIDEO" then
-                            immich:regenerateThumbnail(assetId)
-                        end
+                    if progressScope:isCanceled() then
+                        break
+                    end
+                    checked = checked + 1
+                    if checked == 1 or checked % 10 == 0 or checked == totalAssets then
+                        progressScope:setPortionComplete(checked, totalAssets)
+                        progressScope:setCaption(
+                            string.format("Reading current dates: %d / %d...", checked, totalAssets)
+                        )
+                    end
+
+                    local asset, status = immich:getAssetForScan(assetId)
+                    if status == "gone" then
+                        stats.missing = stats.missing + 1
+                    elseif status ~= "ok" then
+                        stats.unreadable = stats.unreadable + 1
+                    elseif asset.isTrashed then
+                        stats.trashed = stats.trashed + 1
                     else
-                        failedAssets = failedAssets + 1
+                        local current = asset.localDateTime
+                        if Util.nilOrEmpty(current) then
+                            current = asset.fileCreatedAt
+                        end
+                        local oldKey = dateKey(current)
+                        if oldKey == targetKey then
+                            stats.correct = stats.correct + 1
+                        else
+                            table.insert(changes, {
+                                photoId = entry.photo.localIdentifier,
+                                filename = tostring(entry.photo:getFormattedMetadata("fileName") or "photo"),
+                                assetId = assetId,
+                                isoDate = isoDate,
+                                from = oldKey or "unknown",
+                                to = targetKey,
+                                isVideo = isVideo,
+                            })
+                            changedPhotoIds[entry.photo.localIdentifier] = true
+                        end
                     end
                 end
-                if anyUpdated then
-                    updatedPhotos = updatedPhotos + 1
+            end
+        end
+
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return
+        end
+
+        table.sort(changes, function(a, b)
+            if a.filename == b.filename then
+                return a.assetId < b.assetId
+            end
+            return a.filename < b.filename
+        end)
+
+        if #changes == 0 then
+            progressScope:done()
+            local skipped = skippedSummary(stats)
+            local message = "All checked assets already show the date Lightroom has."
+            if skipped ~= "" then
+                message = message .. "\n\n" .. skipped
+            end
+            LrDialogs.message("Date Repair", message, "info")
+            return
+        end
+
+        local changedPhotos = 0
+        for _ in pairs(changedPhotoIds) do
+            changedPhotos = changedPhotos + 1
+        end
+
+        progressScope:setCaption("Waiting for confirmation...")
+        if not confirmDateChanges(changes, changedPhotos, stats) then
+            progressScope:done()
+            return
+        end
+
+        local updatedAssets, failedAssets = 0, 0
+        local updatedPhotoIds = {}
+        for i, change in ipairs(changes) do
+            if progressScope:isCanceled() then
+                break
+            end
+            progressScope:setPortionComplete(i, #changes)
+            progressScope:setCaption(string.format("Updating dates: %d / %d...", i, #changes))
+            if immich:setAssetDate(change.assetId, change.isoDate, { skipConnectivityCheck = true }) then
+                updatedAssets = updatedAssets + 1
+                updatedPhotoIds[change.photoId] = true
+                if change.isVideo then
+                    immich:regenerateThumbnail(change.assetId)
                 end
+            else
+                failedAssets = failedAssets + 1
             end
         end
         progressScope:done()
 
         if progressScope:isCanceled() then
-            LrDialogs.message("Date Repair Cancelled", "The date repair was cancelled.", "info")
+            LrDialogs.message(
+                "Date Repair Cancelled",
+                string.format("%d asset(s) were updated before the cancel.", updatedAssets),
+                "info"
+            )
             return
         end
 
+        local updatedPhotos = 0
+        for _ in pairs(updatedPhotoIds) do
+            updatedPhotos = updatedPhotos + 1
+        end
         local message = string.format("Updated the date on %d asset(s) for %d photo(s).", updatedAssets, updatedPhotos)
         if failedAssets > 0 then
             message = message
@@ -668,9 +869,9 @@ return {
                     spacing = f:control_spacing(),
                     margin = 8,
                     f:static_text({
-                        title = "Sets each asset's date to the date Lightroom shows. Runs on the selected "
-                            .. "photos, or on every uploaded photo when nothing is selected. Fixes screenshots "
-                            .. "and downloads without EXIF that sit on their upload date.",
+                        title = "Sets each asset's date to the date Lightroom shows. Shows a preview of every "
+                            .. "change (current -> Lightroom date) before applying. Runs on the selected photos, "
+                            .. "or on every uploaded photo when nothing is selected.",
                         alignment = "left",
                         font = "<system/small>",
                         fill_horizontal = 1,
