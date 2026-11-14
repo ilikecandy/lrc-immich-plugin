@@ -22,8 +22,9 @@ This repository is a fork of [bmachek/lrc-immich-plugin](https://github.com/bmac
     that no catalog photo references, and trashes them after confirmation. Assets recorded
     by any Immich publish collection are treated as referenced.
   - *Repair Immich Dates* (Lightroom → server): sets every recorded asset's date to the
-    capture date Lightroom shows. Use it once after upgrading to fix assets uploaded with
-    the old upload-date behavior; it covers every per-service asset.
+    capture date Lightroom shows — for the selected photos, or for the whole catalog when
+    nothing is selected. Use it once after upgrading to fix assets uploaded with the old
+    upload-date behavior; it covers every per-service asset.
 - **Immich 3.0 album compatibility** — album asset IDs are resolved through the paginated
   `search/metadata` endpoint, because `GET /albums/{id}` no longer returns assets.
 - **O(1) album membership** — publish builds a set of album asset IDs instead of a linear

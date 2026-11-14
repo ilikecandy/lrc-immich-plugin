@@ -488,13 +488,29 @@ runDateRepairScan = function()
             return
         end
 
+        local selectedPhotos = catalog:getTargetPhotos() or {}
+        local selectedIds = nil
+        if #selectedPhotos > 0 then
+            selectedIds = {}
+            for _, photo in ipairs(selectedPhotos) do
+                selectedIds[photo.localIdentifier] = true
+            end
+        end
+
         local candidates = {}
         for _, entry in pairs(byPhoto) do
-            table.insert(candidates, entry)
+            if not selectedIds or selectedIds[entry.photo.localIdentifier] then
+                table.insert(candidates, entry)
+            end
         end
         if #candidates == 0 then
             progressScope:done()
-            LrDialogs.message("Date Repair", "No uploaded Immich assets found in your Lightroom catalog.", "info")
+            LrDialogs.message(
+                "Date Repair",
+                selectedIds and "No uploaded Immich assets found for the selected photos."
+                    or "No uploaded Immich assets found in your Lightroom catalog.",
+                "info"
+            )
             return
         end
 
@@ -652,8 +668,9 @@ return {
                     spacing = f:control_spacing(),
                     margin = 8,
                     f:static_text({
-                        title = "Sets every recorded asset's date to the capture date Lightroom shows. "
-                            .. "Fixes screenshots and downloads without EXIF that sit on their upload date.",
+                        title = "Sets each asset's date to the date Lightroom shows. Runs on the selected "
+                            .. "photos, or on every uploaded photo when nothing is selected. Fixes screenshots "
+                            .. "and downloads without EXIF that sit on their upload date.",
                         alignment = "left",
                         font = "<system/small>",
                         fill_horizontal = 1,
