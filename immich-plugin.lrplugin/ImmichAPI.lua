@@ -953,6 +953,36 @@ function ImmichAPI:getAssetInfo(assetId)
     return parsedResponse
 end
 
+-- Scan helper: classify an asset with a single request. Unlike getAssetInfo /
+-- doGetRequestAllow404 this skips the per-call connectivity check (one
+-- /users/me request for every photo) and distinguishes a trashed asset from a
+-- live one. Returns "alive", "gone" (missing or trashed), or nil + errReason
+-- when the asset state could not be determined.
+function ImmichAPI:getAssetPresence(assetId)
+    if Util.nilOrEmpty(assetId) then
+        return "gone"
+    end
+    local apiPath = "/assets/" .. tostring(assetId)
+    logRequestStart(self, "GET", apiPath)
+    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders())
+    if not headers then
+        log:error("ImmichAPI getAssetPresence: no response headers: " .. apiPath)
+        return nil, "no response"
+    end
+    if headers.status == SUCCESS_STATUS_GET then
+        local decoded = safeDecodeJson(response, "getAssetPresence")
+        if type(decoded) == "table" and decoded.isTrashed then
+            return "gone"
+        end
+        return "alive"
+    end
+    if headers.status == 404 or headers.status == 400 then
+        return "gone"
+    end
+    log:error("ImmichAPI getAssetPresence: HTTP " .. tostring(headers.status) .. ": " .. apiPath)
+    return nil, "HTTP " .. tostring(headers.status)
+end
+
 function ImmichAPI:checkIfAlbumExists(albumId)
     if Util.nilOrEmpty(albumId) then
         return false

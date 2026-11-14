@@ -6,15 +6,156 @@ local getImmichAlbums = ImportServiceProvider.getImmichAlbums
 local runMobileDeletionsScan, runServerOrphansScan
 
 --------------------------------------------------------------------------------
--- Server -> Lightroom: find catalog photos whose stored Immich asset no longer
--- exists on the server (e.g. culled from a phone). Sequential and cancelable;
--- uses stored-ID existence checks only (deviceAssetId no longer exists).
-local function checkAssetExists(immich, assetId)
-    local ok, info = LrTasks.pcall(function()
-        return immich:doGetRequestAllow404("/assets/" .. assetId)
+-- All publish services of this plug-in. Lightroom reports a service's plug-in ID
+-- with a two character suffix, hence the substring comparison used in PublishTask.
+local function immichPublishServices(catalog)
+    if not catalog then
+        return {}
+    end
+    local services = {}
+    local ok, err = LrTasks.pcall(function()
+        services = catalog:getPublishServices(_PLUGIN.id) or {}
+        if #services > 0 then
+            return
+        end
+        services = {}
+        for _, service in ipairs(catalog:getPublishServices() or {}) do
+            if string.sub(service:getPluginId(), 1, -3) == _PLUGIN.id then
+                table.insert(services, service)
+            end
+        end
     end)
-    return ok and info ~= nil
+    if not ok then
+        log:warn("SyncDeletionsDialog: failed to read publish services: " .. tostring(err))
+        return {}
+    end
+    return services
 end
+
+--------------------------------------------------------------------------------
+-- Collect all published collections of a publish service; collections may be
+-- nested in collection sets, so recurse.
+local function collectPublishedCollections(node, acc)
+    for _, collection in ipairs(node:getChildCollections()) do
+        table.insert(acc, collection)
+    end
+    for _, collectionSet in ipairs(node:getChildCollectionSets()) do
+        collectPublishedCollections(collectionSet, acc)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Record an Immich asset ID for a photo in the photo -> IDs map used by both
+-- scans. Several collections of one service may record the same asset; de-dupe.
+local function addKnownAssetId(byPhoto, photo, assetId)
+    if not photo or Util.nilOrEmpty(assetId) then
+        return
+    end
+    assetId = tostring(assetId)
+    local entry = byPhoto[photo.localIdentifier]
+    if not entry then
+        entry = { photo = photo, ids = {} }
+        byPhoto[photo.localIdentifier] = entry
+    end
+    if not Util.table_contains(entry.ids, assetId) then
+        table.insert(entry.ids, assetId)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Every Immich asset ID Lightroom knows for the catalog:
+--   * the plugin metadata field immichAssetId (Export, and the last Publish)
+--   * Lightroom's published-photo records of every Immich publish service
+-- The metadata field holds a single ID per photo and cannot represent the
+-- per-service assets Publish now keeps (see PublishTask), so both sources are
+-- needed: an asset recorded only by a publish collection is not an orphan.
+local function collectKnownAssetIds(catalog, progressScope)
+    local byPhoto = {}
+    local allPhotos = catalog:getAllPhotos() or {}
+    for i, photo in ipairs(allPhotos) do
+        local ok, assetId = LrTasks.pcall(function()
+            return photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
+        end)
+        if ok then
+            addKnownAssetId(byPhoto, photo, assetId)
+        end
+        if progressScope and (i % 1000 == 0 or i == #allPhotos) then
+            progressScope:setCaption(string.format("Caching local asset IDs: %d / %d...", i, #allPhotos))
+        end
+        if progressScope and progressScope:isCanceled() then
+            break
+        end
+    end
+
+    if progressScope and progressScope:isCanceled() then
+        return byPhoto
+    end
+
+    for _, service in ipairs(immichPublishServices(catalog)) do
+        local collections = {}
+        local okCollections, err = LrTasks.pcall(function()
+            collectPublishedCollections(service, collections)
+        end)
+        if not okCollections then
+            log:warn("SyncDeletionsDialog: failed to read published collections: " .. tostring(err))
+        else
+            for _, collection in ipairs(collections) do
+                local okPhotos, publishedPhotos = LrTasks.pcall(function()
+                    return collection:getPublishedPhotos()
+                end)
+                if okPhotos and publishedPhotos then
+                    for _, publishedPhoto in ipairs(publishedPhotos) do
+                        local okRemote, remoteId = LrTasks.pcall(function()
+                            return publishedPhoto:getRemoteId()
+                        end)
+                        local okPhoto, photo = LrTasks.pcall(function()
+                            return publishedPhoto:getPhoto()
+                        end)
+                        if okRemote and okPhoto then
+                            addKnownAssetId(byPhoto, photo, remoteId)
+                        end
+                    end
+                end
+            end
+        end
+        if progressScope and progressScope:isCanceled() then
+            break
+        end
+    end
+
+    return byPhoto
+end
+
+--------------------------------------------------------------------------------
+-- Flatten the photo -> IDs map into a set of asset IDs.
+local function knownAssetIdSet(byPhoto)
+    local ids = {}
+    for _, entry in pairs(byPhoto) do
+        for _, assetId in ipairs(entry.ids) do
+            ids[assetId] = true
+        end
+    end
+    return ids
+end
+
+--------------------------------------------------------------------------------
+-- Classify an asset without the connectivity round-trip of
+-- doGetRequestAllow404, which is far too expensive for a per-asset scan.
+-- Returns "alive", "gone" (missing or trashed), or nil when the request itself
+-- failed and the asset state is unknown.
+local function checkAssetPresence(immich, assetId)
+    local ok, status, err = LrTasks.pcall(function()
+        return immich:getAssetPresence(assetId)
+    end)
+    if not ok then
+        return nil, tostring(status)
+    end
+    return status, err
+end
+
+--------------------------------------------------------------------------------
+-- Server -> Lightroom: find catalog photos whose stored Immich asset no longer
+-- exists on the server (e.g. culled from a phone). Sequential and cancelable.
 
 runMobileDeletionsScan = function()
     LrTasks.startAsyncTask(function()
@@ -36,15 +177,16 @@ runMobileDeletionsScan = function()
             return
         end
 
-        local allPhotos = catalog:getAllPhotos() or {}
+        progressScope:setCaption("Caching known asset IDs...")
+        local byPhoto = collectKnownAssetIds(catalog, progressScope)
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return
+        end
+
         local candidates = {}
-        for _, photo in ipairs(allPhotos) do
-            local ok, assetId = LrTasks.pcall(function()
-                return photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
-            end)
-            if ok and assetId and assetId ~= "" then
-                table.insert(candidates, { photo = photo, assetId = assetId })
-            end
+        for _, entry in pairs(byPhoto) do
+            table.insert(candidates, entry)
         end
 
         if #candidates == 0 then
@@ -58,6 +200,7 @@ runMobileDeletionsScan = function()
         end
 
         local culledPhotos = {}
+        local unknownError = nil
         for i, entry in ipairs(candidates) do
             if progressScope:isCanceled() then
                 break
@@ -66,11 +209,40 @@ runMobileDeletionsScan = function()
                 progressScope:setPortionComplete(i, #candidates)
                 progressScope:setCaption(string.format("Checking server assets: %d / %d...", i, #candidates))
             end
-            if not checkAssetExists(immich, entry.assetId) then
+
+            -- A photo may hold several assets (one per publish service). It is
+            -- culled only when every asset Lightroom knows for it is gone.
+            local alive = false
+            for _, assetId in ipairs(entry.ids) do
+                local status, err = checkAssetPresence(immich, assetId)
+                if status == "alive" then
+                    alive = true
+                    break
+                elseif status == nil then
+                    unknownError =
+                        string.format("%s (%s)", entry.photo:getFormattedMetadata("fileName") or "photo", tostring(err))
+                    break
+                end
+            end
+            if unknownError then
+                break
+            end
+            if not alive then
                 table.insert(culledPhotos, entry.photo)
             end
         end
         progressScope:done()
+
+        if unknownError then
+            LrDialogs.message(
+                "Scan Aborted",
+                "Could not determine whether a photo still exists on Immich: "
+                    .. unknownError
+                    .. "\n\nNothing was added to the culled collection. Check the server connection and try again.",
+                "critical"
+            )
+            return
+        end
 
         if progressScope:isCanceled() then
             LrDialogs.message("Scan Cancelled", "The deletion sync scan was cancelled.", "info")
@@ -145,27 +317,13 @@ runServerOrphansScan = function(syncDeletionsAlbum)
             return
         end
 
-        progressScope:setCaption("Caching local asset IDs...")
-        local localIds = {}
-        local allPhotos = catalog:getAllPhotos() or {}
-        for i, photo in ipairs(allPhotos) do
-            local ok, assetId = LrTasks.pcall(function()
-                return photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
-            end)
-            if ok and assetId and assetId ~= "" then
-                localIds[assetId] = true
-            end
-            if i % 1000 == 0 then
-                progressScope:setPortionComplete(i, #allPhotos)
-            end
-            if progressScope:isCanceled() then
-                break
-            end
-        end
+        progressScope:setCaption("Caching known asset IDs...")
+        local byPhoto = collectKnownAssetIds(catalog, progressScope)
         if progressScope:isCanceled() then
             progressScope:done()
             return
         end
+        local localIds = knownAssetIdSet(byPhoto)
 
         progressScope:setCaption("Fetching remote assets...")
         local targetAlbums = {}
@@ -265,7 +423,19 @@ return {
 
         local albums = getImmichAlbums() or {}
         table.insert(albums, 1, { title = "Scan All Albums", value = "all" })
-        prefs.syncDeletionsAlbum = prefs.syncDeletionsAlbum or "all"
+        -- Default to a single album: "all" also covers albums this plug-in never
+        -- uploaded to (e.g. phone camera uploads) and is easy to confirm by mistake.
+        -- Keep a previously chosen album while it still exists.
+        local savedAlbumExists = false
+        for _, album in ipairs(albums) do
+            if album.value == prefs.syncDeletionsAlbum then
+                savedAlbumExists = true
+                break
+            end
+        end
+        if not savedAlbumExists then
+            prefs.syncDeletionsAlbum = (#albums > 1) and albums[2].value or "all"
+        end
 
         local f = LrView.osFactory()
         local pendingScan = nil -- "mobile", "orphans", or nil
