@@ -10,7 +10,7 @@ local runMobileDeletionsScan, runServerOrphansScan
 -- with a two character suffix, hence the substring comparison used in PublishTask.
 local function immichPublishServices(catalog)
     if not catalog then
-        return {}
+        return {}, nil
     end
     local services = {}
     local ok, err = LrTasks.pcall(function()
@@ -27,9 +27,9 @@ local function immichPublishServices(catalog)
     end)
     if not ok then
         log:warn("SyncDeletionsDialog: failed to read publish services: " .. tostring(err))
-        return {}
+        return {}, tostring(err)
     end
-    return services
+    return services, nil
 end
 
 --------------------------------------------------------------------------------
@@ -71,6 +71,7 @@ end
 -- needed: an asset recorded only by a publish collection is not an orphan.
 local function collectKnownAssetIds(catalog, progressScope)
     local byPhoto = {}
+    local firstError = nil
     local allPhotos = catalog:getAllPhotos() or {}
     for i, photo in ipairs(allPhotos) do
         local ok, assetId = LrTasks.pcall(function()
@@ -78,6 +79,8 @@ local function collectKnownAssetIds(catalog, progressScope)
         end)
         if ok then
             addKnownAssetId(byPhoto, photo, assetId)
+        else
+            firstError = firstError or ("photo metadata: " .. tostring(assetId))
         end
         if progressScope and (i % 1000 == 0 or i == #allPhotos) then
             progressScope:setCaption(string.format("Caching local asset IDs: %d / %d...", i, #allPhotos))
@@ -88,22 +91,29 @@ local function collectKnownAssetIds(catalog, progressScope)
     end
 
     if progressScope and progressScope:isCanceled() then
-        return byPhoto
+        return byPhoto, nil
     end
 
-    for _, service in ipairs(immichPublishServices(catalog)) do
+    local services, servicesError = immichPublishServices(catalog)
+    if servicesError then
+        return byPhoto, "publish services: " .. servicesError
+    end
+
+    for _, service in ipairs(services) do
         local collections = {}
         local okCollections, err = LrTasks.pcall(function()
             collectPublishedCollections(service, collections)
         end)
         if not okCollections then
-            log:warn("SyncDeletionsDialog: failed to read published collections: " .. tostring(err))
+            firstError = firstError or ("published collections: " .. tostring(err))
         else
             for _, collection in ipairs(collections) do
                 local okPhotos, publishedPhotos = LrTasks.pcall(function()
                     return collection:getPublishedPhotos()
                 end)
-                if okPhotos and publishedPhotos then
+                if not okPhotos then
+                    firstError = firstError or ("published photos: " .. tostring(publishedPhotos))
+                elseif publishedPhotos then
                     for _, publishedPhoto in ipairs(publishedPhotos) do
                         local okRemote, remoteId = LrTasks.pcall(function()
                             return publishedPhoto:getRemoteId()
@@ -113,6 +123,8 @@ local function collectKnownAssetIds(catalog, progressScope)
                         end)
                         if okRemote and okPhoto then
                             addKnownAssetId(byPhoto, photo, remoteId)
+                        else
+                            firstError = firstError or "published photo record"
                         end
                     end
                 end
@@ -123,7 +135,7 @@ local function collectKnownAssetIds(catalog, progressScope)
         end
     end
 
-    return byPhoto
+    return byPhoto, firstError
 end
 
 --------------------------------------------------------------------------------
@@ -178,7 +190,18 @@ runMobileDeletionsScan = function()
         end
 
         progressScope:setCaption("Caching known asset IDs...")
-        local byPhoto = collectKnownAssetIds(catalog, progressScope)
+        local byPhoto, collectError = collectKnownAssetIds(catalog, progressScope)
+        if collectError then
+            progressScope:done()
+            LrDialogs.message(
+                "Scan Aborted",
+                "Could not read Lightroom's Immich asset references: "
+                    .. collectError
+                    .. "\n\nNothing was added to the culled collection. Try again once the catalog is idle.",
+                "critical"
+            )
+            return
+        end
         if progressScope:isCanceled() then
             progressScope:done()
             return
@@ -318,7 +341,18 @@ runServerOrphansScan = function(syncDeletionsAlbum)
         end
 
         progressScope:setCaption("Caching known asset IDs...")
-        local byPhoto = collectKnownAssetIds(catalog, progressScope)
+        local byPhoto, collectError = collectKnownAssetIds(catalog, progressScope)
+        if collectError then
+            progressScope:done()
+            LrDialogs.message(
+                "Scan Aborted",
+                "Could not read Lightroom's Immich asset references: "
+                    .. collectError
+                    .. "\n\nNothing was deleted. Try again once the catalog is idle.",
+                "critical"
+            )
+            return
+        end
         if progressScope:isCanceled() then
             progressScope:done()
             return
