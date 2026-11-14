@@ -1,12 +1,14 @@
 # lrc-immich-plugin
 [![Github All Releases](https://img.shields.io/github/downloads/bmachek/lrc-immich-plugin/total.svg)]()
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7X2240HF4)
 
 Lightroom Classic plug‑in to upload and download photos between Lightroom Classic and an Immich server using the Immich API.  
 Provides both **Export** and **Publish Services**, plus tools to **import assets from Immich back into Lightroom**.
 
-> **Note:** The maintainer is [taking a break from open source](https://blog.fokuspunk.de/posts/taking-a-break-from-open-source/). The plugin remains available and pull requests are welcome, but active development and issue responses will be limited.
+## Help wanted
+Currently, I am looking for co-maintainers, since I've got too many projects at the moment.
 
 ---
 
@@ -74,3 +76,9 @@ You can find the Wiki from the repository home page under the **Wiki** tab.
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bmachek/lrc-immich-plugin&type=Date)](https://star-history.dera.page/#bmachek/lrc-immich-plugin&Date)
+
+---
+
+## License
+
+Licensed under the [GNU General Public License v3.0](LICENSE).
