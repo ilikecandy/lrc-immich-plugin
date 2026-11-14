@@ -221,15 +221,21 @@ end
 -- Lightroom displays and is DST-aware.
 --
 -- Source priority: the "original capture" field, then "digitized". The adjusted
--- "dateTime" field is excluded -- for videos Lightroom routinely fills it with a
--- bogus value (wrong day, unrelated time). Each field has an ISO8601 string and a
--- numeric variant; for some videos (e.g. .mts) the string is nil while the numeric
--- one still holds the value Lightroom shows under "Original Date/Time", so we fall
--- back to the numeric field. Returns nil when nothing usable is present, so the
--- caller leaves Immich's own extraction untouched. Capture-time edits land in the
--- original field, so this still honors "Edit Capture Time".
+-- "dateTime" field is excluded for videos -- Lightroom routinely fills it with a
+-- bogus value (wrong day, unrelated time) -- but used as a last resort for photos
+-- without EXIF (screenshots, social-media downloads) so they keep a date at all.
+-- Each field has an ISO8601 string and a numeric variant; for some videos (e.g.
+-- .mts) the string is nil while the numeric one still holds the value Lightroom
+-- shows under "Original Date/Time", so we fall back to the numeric field. Returns
+-- nil when nothing usable is present, so the caller leaves Immich's own extraction
+-- untouched. Capture-time edits land in the original field, so this still honors
+-- "Edit Capture Time".
 function UploadHelpers.captureTimeForImmich(photo)
+    local isVideo = photo:getRawMetadata("fileFormat") == "VIDEO"
     local cocoa = photo:getRawMetadata("dateTimeOriginal") or photo:getRawMetadata("dateTimeDigitized")
+    if not cocoa and not isVideo then
+        cocoa = photo:getRawMetadata("dateTime")
+    end
 
     -- Prefer the ISO8601 string (Lightroom's local wall-clock, faithful to the
     -- capture-location zone). Fall back to rendering the numeric field locally.

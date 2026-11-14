@@ -241,6 +241,9 @@ local function processOnePhotoGroup(
     end
     local photo = items[1].photo
     local filename = photo:getFormattedMetadata("fileName")
+    -- Immich uses fileCreatedAt as the asset date; for files without EXIF this is
+    -- what keeps screenshots/downloads on their Lightroom capture date.
+    local fileCreatedAt = UploadHelpers.captureTimeForImmich(photo)
     if #items >= 2 then
         UploadHelpers.sortOriginalExportItems(items)
         local assetIds = {}
@@ -250,11 +253,12 @@ local function processOnePhotoGroup(
             local id, errReason
             if i == 1 then
                 -- Primary export: dedup/replace via the plugin's stored Immich asset ID.
-                id, errReason = StackManager.uploadOneAssetOrReplace(immich, photo, item.path, visibility)
+                id, errReason =
+                    StackManager.uploadOneAssetOrReplace(immich, photo, item.path, visibility, fileCreatedAt)
             else
                 -- Stack secondaries have no stored ID and no safe way to resolve a prior
                 -- upload now that deviceAssetId is gone; upload fresh.
-                id, errReason = immich:uploadAsset(item.path, visibility)
+                id, errReason = immich:uploadAsset(item.path, visibility, fileCreatedAt)
             end
             UploadHelpers.safeDeleteTempFile(item.path)
             if not id then
@@ -295,7 +299,7 @@ local function processOnePhotoGroup(
         -- Always treat the single rendition as the export and fetch the disk original.
         local item = items[1]
         log:info("original+export [" .. filename .. "]: single rendition, uploading as export")
-        local id, errReason = StackManager.uploadOneAssetOrReplace(immich, photo, item.path, visibility)
+        local id, errReason = StackManager.uploadOneAssetOrReplace(immich, photo, item.path, visibility, fileCreatedAt)
         UploadHelpers.safeDeleteTempFile(item.path)
         if not id then
             table.insert(failures, filename .. " (" .. (errReason or "Upload failed") .. ")")
@@ -317,7 +321,7 @@ local function processOnePhotoGroup(
                 local originalPath = StackManager.getOriginalFilePath(photo)
                 if originalPath then
                     -- Original is a stack secondary; upload fresh (no stored ID to dedup against).
-                    local origId = immich:uploadAsset(originalPath, visibility)
+                    local origId = immich:uploadAsset(originalPath, visibility, fileCreatedAt)
                     if origId then
                         if not immich:createStack({ id, origId }) then
                             table.insert(stackWarnings, filename .. ": failed to create original+export stack")
@@ -432,6 +436,7 @@ local function processSingleRenditionRenditions(
         if success then
             local photo = rendition.photo
             local originalFileMode = exportParams.originalFileMode
+            local fileCreatedAt = UploadHelpers.captureTimeForImmich(photo)
 
             if originalFileMode == "original_only" or originalFileMode == "original_plus_jpeg_if_edited" then
                 local originalPath = StackManager.getOriginalFilePath(photo)
@@ -443,9 +448,9 @@ local function processSingleRenditionRenditions(
                     log:info("single-rendition [" .. photo:getFormattedMetadata("fileName") .. "]: uploading original")
                     local id, errReason
                     if existingId == nil then
-                        id, errReason = immich:uploadAsset(originalPath, visibility)
+                        id, errReason = immich:uploadAsset(originalPath, visibility, fileCreatedAt)
                     else
-                        id, errReason = immich:replaceAsset(existingId, originalPath, visibility)
+                        id, errReason = immich:replaceAsset(existingId, originalPath, visibility, fileCreatedAt)
                     end
                     if not id then
                         table.insert(
@@ -474,7 +479,7 @@ local function processSingleRenditionRenditions(
                                         .. "]: uploading edited export"
                                 )
                                 -- Edited export is a stack secondary; upload fresh (no stored ID to dedup against).
-                                local exportId = immich:uploadAsset(pathOrMessage, visibility)
+                                local exportId = immich:uploadAsset(pathOrMessage, visibility, fileCreatedAt)
                                 if exportId then
                                     primaryId = exportId
                                     if not immich:createStack({ exportId, id }) then
@@ -509,9 +514,9 @@ local function processSingleRenditionRenditions(
                 local existingId = immich:checkIfAssetExistsEnhanced(photo)
                 local id, errReason
                 if existingId == nil then
-                    id, errReason = immich:uploadAsset(pathOrMessage, visibility)
+                    id, errReason = immich:uploadAsset(pathOrMessage, visibility, fileCreatedAt)
                 else
-                    id, errReason = immich:replaceAsset(existingId, pathOrMessage, visibility)
+                    id, errReason = immich:replaceAsset(existingId, pathOrMessage, visibility, fileCreatedAt)
                 end
                 if not id then
                     table.insert(
@@ -526,8 +531,14 @@ local function processSingleRenditionRenditions(
                         local shouldStack = (originalFileMode == "all")
                             or (originalFileMode == "edited" and StackManager.hasEdits(photo, editedPhotosCache))
                         if shouldStack then
-                            local _, stackError =
-                                StackManager.processPhotoWithStack(immich, rendition, id, exportParams, visibility)
+                            local _, stackError = StackManager.processPhotoWithStack(
+                                immich,
+                                rendition,
+                                id,
+                                exportParams,
+                                visibility,
+                                fileCreatedAt
+                            )
                             if stackError then
                                 table.insert(
                                     stackWarnings,

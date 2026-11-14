@@ -17,12 +17,12 @@ StackManager = {}
 -- Upload a primary asset for a photo, replacing the asset the plugin previously
 -- uploaded when its Immich ID is resolvable from stored Lightroom metadata.
 -- Returns Immich asset id or nil.
-function StackManager.uploadOneAssetOrReplace(immich, photo, path, visibility)
+function StackManager.uploadOneAssetOrReplace(immich, photo, path, visibility, fileCreatedAt)
     local existingId = immich:checkIfAssetExistsEnhanced(photo)
     if existingId == nil then
-        return immich:uploadAsset(path, visibility)
+        return immich:uploadAsset(path, visibility, fileCreatedAt)
     else
-        return immich:replaceAsset(existingId, path, visibility)
+        return immich:replaceAsset(existingId, path, visibility, fileCreatedAt)
     end
 end
 
@@ -255,7 +255,7 @@ end
 
 --------------------------------------------------------------------------------
 -- Upload original file and create stack with edited photo as primary
-function StackManager.processPhotoWithStack(immich, rendition, editedAssetId, exportParams, visibility)
+function StackManager.processPhotoWithStack(immich, rendition, editedAssetId, exportParams, visibility, fileCreatedAt)
     if not immich then
         log:warn("processPhotoWithStack: immich API instance is nil")
         return editedAssetId, "API not available"
@@ -279,7 +279,7 @@ function StackManager.processPhotoWithStack(immich, rendition, editedAssetId, ex
     -- and with deviceAssetId/deviceId removed from Immich there is no safe way to
     -- resolve a prior upload of it. Upload fresh — a re-export may create a duplicate
     -- original rather than risk resolving (and later trashing) a foreign asset.
-    local originalAssetId = immich:uploadAsset(originalPath, visibility)
+    local originalAssetId = immich:uploadAsset(originalPath, visibility, fileCreatedAt)
 
     if not originalAssetId then
         return editedAssetId, "Failed to upload original file"

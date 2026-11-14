@@ -42,6 +42,20 @@ local function logRequestStart(api, method, apiPath)
     log:trace("ImmichAPI: Preparing " .. method .. " request " .. api.url .. api.apiBasePath .. apiPath)
 end
 
+-- Immich requires a strict ISO 8601 datetime with an explicit timezone. Accept the
+-- zoned strings produced by UploadHelpers.captureTimeForImmich and normalize the
+-- offset form (+0200 -> +02:00); append 'Z' when the value has no zone at all.
+local function normalizeImmichDate(value)
+    if Util.nilOrEmpty(value) then
+        return nil
+    end
+    local date = tostring(value)
+    if date:match("[Zz]$") or date:match("[%+%-]%d%d:?%d%d$") then
+        return (date:gsub("([+-]%d%d)(%d%d)$", "%1:%2"))
+    end
+    return date .. "Z"
+end
+
 local function handleRequestFailure(method, apiPath, status, headers, response)
     -- Log the failure; do not show a modal dialog. During batch exports many requests can fail
     -- (e.g. one stack per photo). A modal dialog per failure would block the entire export and
@@ -369,24 +383,21 @@ function ImmichAPI:getAssetUrl(id)
     return self.url .. "/photos/" .. id
 end
 
-function ImmichAPI:uploadAsset(pathOrMessage, visibility)
+-- fileCreatedAt is the photo's capture time (zoned ISO 8601, see
+-- UploadHelpers.captureTimeForImmich). Immich uses it as the asset date, so
+-- files without EXIF (screenshots, social-media downloads) keep the Lightroom
+-- date instead of the upload date. Pass nil to fall back to the upload time.
+function ImmichAPI:uploadAsset(pathOrMessage, visibility, fileCreatedAt)
     if Util.nilOrEmpty(pathOrMessage) then
         ErrorHandler.handleError("No filename given. Check logs.", "uploadAsset: pathOrMessage empty")
         return nil
     end
 
     local apiPath = "/assets"
-    -- Immich requires a strict ISO 8601 datetime with an explicit timezone (a 'Z' or
-    -- a colon-separated offset, e.g. 2026-07-03T05:13:22.583Z). On this SDK
-    -- LrDate.timeToW3CDate returns a naive UTC timestamp with no zone designator, so
-    -- append 'Z'. If a build ever returns an offset already, normalize +0200 -> +02:00.
-    local submitDate = LrDate.timeToW3CDate(LrDate.currentTime())
-    if submitDate:match("[Zz]$") or submitDate:match("[%+%-]%d%d:?%d%d$") then
-        submitDate = submitDate:gsub("([+-]%d%d)(%d%d)$", "%1:%2")
-    else
-        submitDate = submitDate .. "Z"
-    end
-    log:trace("uploadAsset: " .. tostring(pathOrMessage) .. " submitted at " .. submitDate)
+    local submitDate = normalizeImmichDate(fileCreatedAt)
+        or normalizeImmichDate(LrDate.timeToW3CDate(LrDate.currentTime()))
+    local modifiedDate = normalizeImmichDate(LrDate.timeToW3CDate(LrDate.currentTime()))
+    log:trace("uploadAsset: " .. tostring(pathOrMessage) .. " created " .. tostring(submitDate))
     local filePath = pathOrMessage
     local fileName = LrPathUtils.leafName(filePath)
 
@@ -398,7 +409,7 @@ function ImmichAPI:uploadAsset(pathOrMessage, visibility)
             contentType = "application/octet-stream",
         },
         { name = "fileCreatedAt", value = submitDate },
-        { name = "fileModifiedAt", value = submitDate },
+        { name = "fileModifiedAt", value = modifiedDate },
         { name = "isFavorite", value = "false" },
     }
     if visibility and visibility ~= "" then
@@ -420,7 +431,7 @@ end
 -- Since Immich removed deviceId there is no longer any way to verify ownership of
 -- an asset resolved by filename/date, so callers must never pass an id obtained
 -- from a heuristic match.
-function ImmichAPI:replaceAsset(immichId, pathOrMessage, visibility)
+function ImmichAPI:replaceAsset(immichId, pathOrMessage, visibility, fileCreatedAt)
     if Util.nilOrEmpty(immichId) then
         ErrorHandler.handleError("Immich asset ID missing. Check logs.", "replaceAsset: immichId empty")
         return nil
@@ -434,7 +445,7 @@ function ImmichAPI:replaceAsset(immichId, pathOrMessage, visibility)
     -- Upload to regular library first so copy/delete work even when the target
     -- visibility is "locked" (Immich blocks copy and delete on locked assets).
     -- Visibility is applied after metadata is transferred.
-    local newImmichId, errReason = self:uploadAsset(pathOrMessage, nil)
+    local newImmichId, errReason = self:uploadAsset(pathOrMessage, nil, fileCreatedAt)
     if newImmichId ~= nil then
         -- Immich may return the existing asset ID (e.g. duplicate detection); skip replace steps
         if newImmichId == immichId then
@@ -495,14 +506,16 @@ end
 -- Set the capture date (dateTimeOriginal) on an existing asset, mirroring the
 -- web UI's date editor. Used to push Lightroom's edited capture time for assets
 -- Immich cannot read it from the file (videos). Immich persists this to a
--- sidecar, so it survives later metadata re-extraction.
-function ImmichAPI:setAssetDate(assetId, isoDate)
+-- sidecar, so it survives later metadata re-extraction. Pass
+-- { skipConnectivityCheck = true } for bulk repairs that already checked the
+-- connection once.
+function ImmichAPI:setAssetDate(assetId, isoDate, options)
     if Util.nilOrEmpty(assetId) or Util.nilOrEmpty(isoDate) then
         log:warn("setAssetDate: assetId or date empty")
         return false
     end
     local body = { dateTimeOriginal = isoDate }
-    local parsedResponse = self:doCustomRequest("PUT", "/assets/" .. assetId, body)
+    local parsedResponse = self:doCustomRequest("PUT", "/assets/" .. assetId, body, options)
     if parsedResponse == nil then
         log:error("setAssetDate: failed to set date " .. tostring(isoDate) .. " on " .. assetId)
         return false
@@ -1055,8 +1068,8 @@ function ImmichAPI:doPostRequest(apiPath, postBody)
     return nil, errReason
 end
 
-function ImmichAPI:doCustomRequest(method, apiPath, postBody)
-    if not ensureConnectivity(self) then
+function ImmichAPI:doCustomRequest(method, apiPath, postBody, options)
+    if not (options and options.skipConnectivityCheck) and not ensureConnectivity(self) then
         return nil
     end
 

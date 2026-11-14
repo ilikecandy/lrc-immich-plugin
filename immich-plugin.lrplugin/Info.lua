@@ -40,7 +40,7 @@ return {
             enabledWhen = "photosSelected",
         },
         {
-            title = "Sync & Clean Deletions",
+            title = "Sync, Clean & Repair Immich",
             file = "SyncDeletionsDialog.lua",
         },
     },
@@ -55,7 +55,7 @@ return {
             file = "ImportConfiguration.lua",
         },
         {
-            title = "Sync & Clean Deletions",
+            title = "Sync, Clean & Repair Immich",
             file = "SyncDeletionsDialog.lua",
         },
     },
@@ -64,5 +64,5 @@ return {
 
     LrPluginInfoURL = "https://github.com/bmachek/lrc-immich-plugin/",
 
-    VERSION = { major = 4, minor = 5, revision = 0, build = 0 },
+    VERSION = { major = 4, minor = 6, revision = 0, build = 0 },
 }

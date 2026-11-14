@@ -1,9 +1,11 @@
+require("UploadHelpers")
+
 local ImportServiceProvider = require("ImportServiceProvider")
 local getImmichAlbums = ImportServiceProvider.getImmichAlbums
 
 --------------------------------------------------------------------------------
 -- Forward declarations (dialog dispatches to these after close).
-local runMobileDeletionsScan, runServerOrphansScan
+local runMobileDeletionsScan, runServerOrphansScan, runDateRepairScan
 
 --------------------------------------------------------------------------------
 -- All publish services of this plug-in. Lightroom reports a service's plug-in ID
@@ -444,6 +446,111 @@ runServerOrphansScan = function(syncDeletionsAlbum)
 end
 
 --------------------------------------------------------------------------------
+-- Lightroom -> Server: set each known asset's capture date to the date Lightroom
+-- shows. Files without EXIF (screenshots, social-media downloads) used to be
+-- uploaded on their upload date; this repairs them, including every per-service
+-- asset recorded for a photo.
+runDateRepairScan = function()
+    LrTasks.startAsyncTask(function()
+        local catalog = LrApplication.activeCatalog()
+        if not catalog then
+            LrDialogs.message("Error", "Could not open active catalog.", "critical")
+            return
+        end
+
+        local progressScope = LrProgressScope({
+            title = "Repairing Immich Dates",
+            caption = "Connecting...",
+        })
+
+        local immich = ImmichAPI:new(prefs.url, prefs.apiKey)
+        if not immich:checkConnectivity() then
+            progressScope:done()
+            LrDialogs.message("Error", "Could not connect to Immich server. Please check your URL/key.", "critical")
+            return
+        end
+
+        progressScope:setCaption("Caching known asset IDs...")
+        local byPhoto, collectError = collectKnownAssetIds(catalog, progressScope)
+        if collectError then
+            progressScope:done()
+            LrDialogs.message(
+                "Date Repair Aborted",
+                "Could not read Lightroom's Immich asset references: "
+                    .. collectError
+                    .. "\n\nNo dates were changed. Try again once the catalog is idle.",
+                "critical"
+            )
+            return
+        end
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return
+        end
+
+        local candidates = {}
+        for _, entry in pairs(byPhoto) do
+            table.insert(candidates, entry)
+        end
+        if #candidates == 0 then
+            progressScope:done()
+            LrDialogs.message("Date Repair", "No uploaded Immich assets found in your Lightroom catalog.", "info")
+            return
+        end
+
+        local updatedAssets, updatedPhotos, failedAssets = 0, 0, 0
+        for i, entry in ipairs(candidates) do
+            if progressScope:isCanceled() then
+                break
+            end
+            if i == 1 or i % 10 == 0 or i == #candidates then
+                progressScope:setPortionComplete(i, #candidates)
+                progressScope:setCaption(string.format("Repairing dates: %d / %d...", i, #candidates))
+            end
+
+            local isoDate = UploadHelpers.captureTimeForImmich(entry.photo)
+            if Util.nilOrEmpty(isoDate) then
+                failedAssets = failedAssets + #entry.ids
+                log:warn(
+                    "Date repair: no Lightroom capture date for "
+                        .. tostring(entry.photo:getFormattedMetadata("fileName"))
+                )
+            else
+                local anyUpdated = false
+                for _, assetId in ipairs(entry.ids) do
+                    if immich:setAssetDate(assetId, isoDate, { skipConnectivityCheck = true }) then
+                        updatedAssets = updatedAssets + 1
+                        anyUpdated = true
+                        -- Changing a video date invalidates its thumbnail; queue a rebuild.
+                        if entry.photo:getRawMetadata("fileFormat") == "VIDEO" then
+                            immich:regenerateThumbnail(assetId)
+                        end
+                    else
+                        failedAssets = failedAssets + 1
+                    end
+                end
+                if anyUpdated then
+                    updatedPhotos = updatedPhotos + 1
+                end
+            end
+        end
+        progressScope:done()
+
+        if progressScope:isCanceled() then
+            LrDialogs.message("Date Repair Cancelled", "The date repair was cancelled.", "info")
+            return
+        end
+
+        local message = string.format("Updated the date on %d asset(s) for %d photo(s).", updatedAssets, updatedPhotos)
+        if failedAssets > 0 then
+            message = message
+                .. string.format("\n\n%d asset(s) could not be updated (see the plugin log).", failedAssets)
+        end
+        LrDialogs.message("Date Repair Complete", message, "info")
+    end)
+end
+
+--------------------------------------------------------------------------------
 return {
     LrTasks.startAsyncTask(function()
         if not prefs.url or not prefs.apiKey or prefs.url == "" or prefs.apiKey == "" then
@@ -472,7 +579,7 @@ return {
         end
 
         local f = LrView.osFactory()
-        local pendingScan = nil -- "mobile", "orphans", or nil
+        local pendingScan = nil -- "mobile", "orphans", "dates", or nil
 
         local contents = f:column({
             bind_to_object = prefs,
@@ -538,10 +645,35 @@ return {
                     }),
                 }),
             }),
+            f:group_box({
+                title = "3. Repair Immich Dates (Lightroom to Server)",
+                fill_horizontal = 1,
+                f:column({
+                    spacing = f:control_spacing(),
+                    margin = 8,
+                    f:static_text({
+                        title = "Sets every recorded asset's date to the capture date Lightroom shows. "
+                            .. "Fixes screenshots and downloads without EXIF that sit on their upload date.",
+                        alignment = "left",
+                        font = "<system/small>",
+                        fill_horizontal = 1,
+                    }),
+                    f:row({
+                        margin_top = 10,
+                        f:push_button({
+                            title = "Repair Dates",
+                            action = function()
+                                pendingScan = "dates"
+                                LrDialogs.closeCurrentModal("ok")
+                            end,
+                        }),
+                    }),
+                }),
+            }),
         })
 
         LrDialogs.presentModalDialog({
-            title = "Sync & Clean Deletions",
+            title = "Sync, Clean & Repair Immich",
             contents = contents,
             actionVerb = "Close",
         })
@@ -557,6 +689,11 @@ return {
             end)
             if not ok then
                 log:error("Server orphans scan error: " .. tostring(err))
+            end
+        elseif pendingScan == "dates" then
+            local ok, err = LrTasks.pcall(runDateRepairScan)
+            if not ok then
+                log:error("Date repair error: " .. tostring(err))
             end
         end
     end),

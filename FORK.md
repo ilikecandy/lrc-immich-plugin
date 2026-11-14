@@ -10,7 +10,10 @@ This repository is a fork of [bmachek/lrc-immich-plugin](https://github.com/bmac
   progress caption shows count, throughput, and ETA.
 - **Publish selection prompt** — when only a subset of the pending photos is selected in the
   grid, asks whether to publish the selection or all pending photos before rendering starts.
-- **Sync & Clean Deletions** — a menu command with two scans:
+- **Capture dates on upload** — uploads send the photo's Lightroom capture date as Immich's
+  `fileCreatedAt`, so screenshots and social-media downloads without EXIF no longer land on
+  their upload date. Videos already received the same treatment via a post-upload update.
+- **Sync, Clean & Repair Immich** — a menu command with three actions:
   - *Mobile Culling Sync* (server → Lightroom): finds catalog photos whose known Immich
     assets are missing or trashed, and puts them in the `Immich Mobile Deleted / Culled`
     collection for review. A photo counts as culled only when **every** asset Lightroom
@@ -18,6 +21,9 @@ This repository is a fork of [bmachek/lrc-immich-plugin](https://github.com/bmac
   - *Clean Server Orphans* (Lightroom → server): finds assets in an album (or all albums)
     that no catalog photo references, and trashes them after confirmation. Assets recorded
     by any Immich publish collection are treated as referenced.
+  - *Repair Immich Dates* (Lightroom → server): sets every recorded asset's date to the
+    capture date Lightroom shows. Use it once after upgrading to fix assets uploaded with
+    the old upload-date behavior; it covers every per-service asset.
 - **Immich 3.0 album compatibility** — album asset IDs are resolved through the paginated
   `search/metadata` endpoint, because `GET /albums/{id}` no longer returns assets.
 - **O(1) album membership** — publish builds a set of album asset IDs instead of a linear

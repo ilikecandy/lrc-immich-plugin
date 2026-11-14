@@ -273,11 +273,14 @@ end
 -- service published before when that asset is still available.
 local function uploadPublishPrimary(immich, rendition, photo, path, visibility, publishedIdIndex)
     local existingId = resolvePublishedAssetId(immich, rendition, photo, publishedIdIndex)
+    -- Keep files without EXIF (screenshots, downloads) on their Lightroom capture
+    -- date: Immich uses fileCreatedAt as the asset date.
+    local fileCreatedAt = UploadHelpers.captureTimeForImmich(photo)
     local id, errReason
     if existingId == nil then
-        id, errReason = immich:uploadAsset(path, visibility)
+        id, errReason = immich:uploadAsset(path, visibility, fileCreatedAt)
     else
-        id, errReason = immich:replaceAsset(existingId, path, visibility)
+        id, errReason = immich:replaceAsset(existingId, path, visibility, fileCreatedAt)
     end
     -- Keep the index and the sibling collections current so a photo published into
     -- several collections of this service resolves to the same asset in every one of them.
@@ -431,6 +434,7 @@ local function processPublishOnePhotoGroup(
     end
     local photo = items[1].photo
     local filename = photo:getFormattedMetadata("fileName")
+    local fileCreatedAt = UploadHelpers.captureTimeForImmich(photo)
     if #items >= 2 then
         UploadHelpers.sortOriginalExportItems(items)
         local assetIds = {}
@@ -445,7 +449,7 @@ local function processPublishOnePhotoGroup(
             else
                 -- Stack secondaries have no stored ID and no safe way to resolve a prior
                 -- upload now that deviceAssetId is gone; upload fresh.
-                id, errReason = immich:uploadAsset(item.path, visibility)
+                id, errReason = immich:uploadAsset(item.path, visibility, fileCreatedAt)
             end
             UploadHelpers.safeDeleteTempFile(item.path)
             if not id then
@@ -519,7 +523,7 @@ local function processPublishOnePhotoGroup(
                     local originalPath = StackManager.getOriginalFilePath(photo)
                     if originalPath then
                         -- Untracked orphan secondary: upload fresh (no stored ID to dedup against).
-                        local origId = immich:uploadAsset(originalPath, visibility)
+                        local origId = immich:uploadAsset(originalPath, visibility, fileCreatedAt)
                         if origId then
                             -- Warn once per publish run to keep the post-publish dialog concise.
                             if not stackWarnings._orphanOriginalsWarned then
