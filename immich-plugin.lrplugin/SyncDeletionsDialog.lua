@@ -135,7 +135,7 @@ local function collectKnownAssetIds(catalog, progressScope)
         if not okCollections then
             firstError = firstError or ("published collections: " .. tostring(err))
         else
-            local skipDefaultCollections = #collections > 1
+            local skipSmartCollections = #collections > 1
             for _, collection in ipairs(collections) do
                 local collectionName = "collection"
                 local okName, name = LrTasks.pcall(function()
@@ -145,18 +145,19 @@ local function collectKnownAssetIds(catalog, progressScope)
                     collectionName = tostring(name)
                 end
 
-                -- The default smart "Photos" collection mirrors every published
-                -- photo; the normal collections already cover those records.
-                local isDefault = false
-                if skipDefaultCollections then
-                    local okInfo, info = LrTasks.pcall(function()
-                        return collection:getCollectionInfoSummary()
+                -- The smart "Photos" published collection mirrors every published
+                -- photo (53k records here); the normal collections already cover
+                -- those records. Skip smart collections when normal ones exist.
+                local isSmart = false
+                if skipSmartCollections then
+                    local okSmart, smart = LrTasks.pcall(function()
+                        return collection:isSmartCollection()
                     end)
-                    isDefault = okInfo and info and info.isDefaultCollection == true
+                    isSmart = okSmart and smart == true
                 end
 
-                if isDefault then
-                    log:trace("collectKnownAssetIds: skipping default published collection '" .. collectionName .. "'")
+                if isSmart then
+                    log:trace("collectKnownAssetIds: skipping smart published collection '" .. collectionName .. "'")
                 else
                     if progressScope then
                         progressScope:setCaption("Checking published collection: " .. collectionName .. "...")
