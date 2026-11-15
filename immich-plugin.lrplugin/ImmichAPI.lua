@@ -977,7 +977,7 @@ function ImmichAPI:getAssetPresence(assetId)
     end
     local apiPath = "/assets/" .. tostring(assetId)
     logRequestStart(self, "GET", apiPath)
-    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders())
+    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders(), 15)
     if not headers then
         log:error("ImmichAPI getAssetPresence: no response headers: " .. apiPath)
         return nil, "no response"
@@ -1005,7 +1005,7 @@ function ImmichAPI:getAssetForScan(assetId)
     end
     local apiPath = "/assets/" .. tostring(assetId)
     logRequestStart(self, "GET", apiPath)
-    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders())
+    local response, headers = LrHttp.get(self.url .. self.apiBasePath .. apiPath, self:createHeaders(), 15)
     if not headers then
         log:error("ImmichAPI getAssetForScan: no response headers: " .. apiPath)
         return nil, "error"
@@ -1022,6 +1022,85 @@ function ImmichAPI:getAssetForScan(assetId)
     end
     log:error("ImmichAPI getAssetForScan: HTTP " .. tostring(headers.status) .. ": " .. apiPath)
     return nil, "error"
+end
+
+-- Bulk scan helper: page through /search/metadata once and return the dates of
+-- the requested asset IDs. This replaces one GET per asset (tens of thousands
+-- on a large catalog) with a few dozen page requests. Supports both the older
+-- page/nextPage pagination and the current cursor/nextCursor pagination.
+-- onProgress(page, total, fetched) is optional. Returns a map
+-- assetId -> { localDateTime, fileCreatedAt, isTrashed }, or nil + error.
+function ImmichAPI:getAssetDatesForScan(wantedIds, onProgress)
+    if type(wantedIds) ~= "table" then
+        return nil, "wantedIds missing"
+    end
+    local dates = {}
+    local page = 1
+    local cursor = nil
+    local total = nil
+    local fetched = 0
+    local pageSize = 1000
+
+    while true do
+        local body = { size = pageSize, withDeleted = true }
+        if cursor then
+            body.cursor = cursor
+        else
+            body.page = page
+        end
+
+        local response = self:doPostRequest("/search/metadata", body)
+        if not response or type(response) ~= "table" or type(response.assets) ~= "table" then
+            return nil, "search/metadata failed on page " .. tostring(page)
+        end
+
+        local assets = response.assets
+        total = tonumber(assets.total) or total
+        for _, asset in ipairs(assets.items or {}) do
+            fetched = fetched + 1
+            if asset.id and wantedIds[asset.id] then
+                dates[asset.id] = {
+                    localDateTime = asset.localDateTime,
+                    fileCreatedAt = asset.fileCreatedAt,
+                    isTrashed = asset.isTrashed,
+                }
+            end
+        end
+
+        if onProgress then
+            onProgress(page, total, fetched)
+        end
+
+        if assets.nextCursor and assets.nextCursor ~= "" and assets.nextCursor ~= cursor then
+            cursor = assets.nextCursor
+            page = page + 1
+        else
+            local nextPage = tonumber(assets.nextPage)
+            if not nextPage or nextPage <= page then
+                break
+            end
+            page = nextPage
+        end
+    end
+
+    return dates
+end
+
+-- Bulk version of setAssetDate: update several assets that share one date in a
+-- single request. Used by the date repair, where one photo can have an asset per
+-- publish service.
+function ImmichAPI:setAssetsDate(assetIds, isoDate)
+    if type(assetIds) ~= "table" or #assetIds == 0 or Util.nilOrEmpty(isoDate) then
+        log:warn("setAssetsDate: assetIds or date empty")
+        return false
+    end
+    local body = { ids = assetIds, dateTimeOriginal = isoDate }
+    local parsedResponse = self:doCustomRequest("PUT", "/assets", body, { skipConnectivityCheck = true })
+    if parsedResponse == nil then
+        log:error("setAssetsDate: failed to set date " .. tostring(isoDate) .. " on " .. #assetIds .. " asset(s)")
+        return false
+    end
+    return true
 end
 
 function ImmichAPI:checkIfAlbumExists(albumId)

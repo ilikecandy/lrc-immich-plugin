@@ -631,22 +631,43 @@ runDateRepairScan = function()
             totalAssets = totalAssets + #entry.ids
         end
 
-        local checked = 0
+        local wantedIds = {}
         for _, entry in ipairs(candidates) do
-            if progressScope:isCanceled() then
-                break
+            for _, assetId in ipairs(entry.ids) do
+                wantedIds[assetId] = true
             end
+        end
 
-            local isoDate = UploadHelpers.captureTimeForImmich(entry.photo)
-            local targetKey = dateKey(isoDate)
-            local isVideo = entry.photo:getRawMetadata("fileFormat") == "VIDEO"
-            if not targetKey then
-                stats.noDate = stats.noDate + #entry.ids
-                checked = checked + #entry.ids
-                if checked == totalAssets then
-                    progressScope:setPortionComplete(checked, totalAssets)
+        -- Fetch current dates. A catalog with tens of thousands of assets would
+        -- need that many GETs; for large sets use one paginated search instead.
+        local datesByAsset = {}
+        local useBulk = totalAssets > 500
+        if useBulk then
+            progressScope:setCaption("Reading asset dates from Immich...")
+            local dates, bulkError = immich:getAssetDatesForScan(wantedIds, function(pageNo, total, fetched)
+                progressScope:setCaption(string.format("Reading asset dates: page %d (%d assets)...", pageNo, fetched))
+                if total and total > 0 then
+                    progressScope:setPortionComplete(math.min(fetched, total), total)
                 end
-            else
+            end)
+            if not dates then
+                progressScope:done()
+                LrDialogs.message(
+                    "Date Repair Aborted",
+                    "Could not read asset dates from Immich: "
+                        .. tostring(bulkError)
+                        .. "\n\nNo dates were changed. Check the server connection and try again.",
+                    "critical"
+                )
+                return
+            end
+            datesByAsset = dates
+        else
+            local checked = 0
+            for _, entry in ipairs(candidates) do
+                if progressScope:isCanceled() then
+                    break
+                end
                 for _, assetId in ipairs(entry.ids) do
                     if progressScope:isCanceled() then
                         break
@@ -658,11 +679,36 @@ runDateRepairScan = function()
                             string.format("Reading current dates: %d / %d...", checked, totalAssets)
                         )
                     end
-
                     local asset, status = immich:getAssetForScan(assetId)
-                    if status == "gone" then
+                    if status == "ok" then
+                        datesByAsset[assetId] = asset
+                    elseif status == "gone" then
+                        datesByAsset[assetId] = false
+                    else
+                        datesByAsset[assetId] = "error"
+                    end
+                end
+            end
+        end
+
+        if progressScope:isCanceled() then
+            progressScope:done()
+            return
+        end
+
+        -- Compare the fetched dates with Lightroom's capture dates.
+        for _, entry in ipairs(candidates) do
+            local isoDate = UploadHelpers.captureTimeForImmich(entry.photo)
+            local targetKey = dateKey(isoDate)
+            local isVideo = entry.photo:getRawMetadata("fileFormat") == "VIDEO"
+            if not targetKey then
+                stats.noDate = stats.noDate + #entry.ids
+            else
+                for _, assetId in ipairs(entry.ids) do
+                    local asset = datesByAsset[assetId]
+                    if asset == false or asset == nil then
                         stats.missing = stats.missing + 1
-                    elseif status ~= "ok" then
+                    elseif asset == "error" then
                         stats.unreadable = stats.unreadable + 1
                     elseif asset.isTrashed then
                         stats.trashed = stats.trashed + 1
@@ -689,11 +735,6 @@ runDateRepairScan = function()
                     end
                 end
             end
-        end
-
-        if progressScope:isCanceled() then
-            progressScope:done()
-            return
         end
 
         table.sort(changes, function(a, b)
@@ -725,22 +766,55 @@ runDateRepairScan = function()
             return
         end
 
+        local updates = {}
+        local updateOrder = {}
+        for _, change in ipairs(changes) do
+            local update = updates[change.photoId]
+            if not update then
+                update = { photoId = change.photoId, ids = {}, isoDate = change.isoDate, isVideo = false }
+                updates[change.photoId] = update
+                table.insert(updateOrder, change.photoId)
+            end
+            table.insert(update.ids, change.assetId)
+            if change.isVideo then
+                update.isVideo = true
+            end
+        end
+
         local updatedAssets, failedAssets = 0, 0
         local updatedPhotoIds = {}
-        for i, change in ipairs(changes) do
+        for i, photoId in ipairs(updateOrder) do
             if progressScope:isCanceled() then
                 break
             end
-            progressScope:setPortionComplete(i, #changes)
-            progressScope:setCaption(string.format("Updating dates: %d / %d...", i, #changes))
-            if immich:setAssetDate(change.assetId, change.isoDate, { skipConnectivityCheck = true }) then
-                updatedAssets = updatedAssets + 1
-                updatedPhotoIds[change.photoId] = true
-                if change.isVideo then
-                    immich:regenerateThumbnail(change.assetId)
-                end
+            local update = updates[photoId]
+            progressScope:setPortionComplete(i, #updateOrder)
+            progressScope:setCaption(string.format("Updating dates: %d / %d photo(s)...", i, #updateOrder))
+
+            local okCount, failCount = 0, 0
+            if immich:setAssetsDate(update.ids, update.isoDate) then
+                okCount = #update.ids
             else
-                failedAssets = failedAssets + 1
+                -- Older servers or a locked asset can reject the bulk update; retry
+                -- asset by asset so the rest of the photo is still repaired.
+                for _, assetId in ipairs(update.ids) do
+                    if immich:setAssetDate(assetId, update.isoDate, { skipConnectivityCheck = true }) then
+                        okCount = okCount + 1
+                    else
+                        failCount = failCount + 1
+                    end
+                end
+            end
+
+            updatedAssets = updatedAssets + okCount
+            failedAssets = failedAssets + failCount
+            if okCount > 0 then
+                updatedPhotoIds[photoId] = true
+                if update.isVideo then
+                    for _, assetId in ipairs(update.ids) do
+                        immich:regenerateThumbnail(assetId)
+                    end
+                end
             end
         end
         progressScope:done()

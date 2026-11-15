@@ -24,8 +24,10 @@ This repository is a fork of [bmachek/lrc-immich-plugin](https://github.com/bmac
   - *Repair Immich Dates* (Lightroom → server): reads each asset's current date, previews
     every change (filename, current date → Lightroom date) and asks for confirmation before
     writing. Runs on the selected photos, or on the whole catalog when nothing is selected.
-    Use it once after upgrading to fix assets uploaded with the old upload-date behavior; it
-    covers every per-service asset.
+    Large catalogs are scanned with Immich's paginated search and updated with one bulk
+    request per photo, so tens of thousands of assets don't turn into tens of thousands of
+    HTTP calls. Use it once after upgrading to fix assets uploaded with the old upload-date
+    behavior; it covers every per-service asset.
 - **Immich 3.0 album compatibility** — album asset IDs are resolved through the paginated
   `search/metadata` endpoint, because `GET /albums/{id}` no longer returns assets.
 - **O(1) album membership** — publish builds a set of album asset IDs instead of a linear
