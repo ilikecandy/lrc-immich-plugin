@@ -135,6 +135,7 @@ local function collectKnownAssetIds(catalog, progressScope)
         if not okCollections then
             firstError = firstError or ("published collections: " .. tostring(err))
         else
+            local skipDefaultCollections = #collections > 1
             for _, collection in ipairs(collections) do
                 local collectionName = "collection"
                 local okName, name = LrTasks.pcall(function()
@@ -144,60 +145,76 @@ local function collectKnownAssetIds(catalog, progressScope)
                     collectionName = tostring(name)
                 end
 
-                -- With one publish service, Publish writes the asset ID into the
-                -- photo metadata. If every photo in this collection already has
-                -- one, the published records would only repeat it; skip the
-                -- expensive per-record walk.
-                local needsPublishedWalk = true
-                if singleService then
-                    local okPhotos, photos = LrTasks.pcall(function()
-                        return collection:getPhotos()
+                -- The default smart "Photos" collection mirrors every published
+                -- photo; the normal collections already cover those records.
+                local isDefault = false
+                if skipDefaultCollections then
+                    local okInfo, info = LrTasks.pcall(function()
+                        return collection:getCollectionInfoSummary()
                     end)
-                    if okPhotos and photos and #photos > 0 then
-                        needsPublishedWalk = false
-                        for _, photo in ipairs(photos) do
-                            if not byPhoto[photo.localIdentifier] then
-                                needsPublishedWalk = true
-                                break
+                    isDefault = okInfo and info and info.isDefaultCollection == true
+                end
+
+                if isDefault then
+                    log:trace("collectKnownAssetIds: skipping default published collection '" .. collectionName .. "'")
+                else
+                    -- With one publish service, Publish writes the asset ID into the
+                    -- photo metadata. If every photo in this collection already has
+                    -- one, the published records would only repeat it; skip the
+                    -- expensive per-record walk.
+                    local needsPublishedWalk = true
+                    if singleService then
+                        local okPhotos, photos = LrTasks.pcall(function()
+                            return collection:getPhotos()
+                        end)
+                        if okPhotos and photos and #photos > 0 then
+                            needsPublishedWalk = false
+                            for _, photo in ipairs(photos) do
+                                if not byPhoto[photo.localIdentifier] then
+                                    needsPublishedWalk = true
+                                    break
+                                end
                             end
                         end
                     end
-                end
 
-                if not needsPublishedWalk then
-                    log:trace("collectKnownAssetIds: metadata covers published collection '" .. collectionName .. "'")
-                else
-                    local okPublished, publishedPhotos = LrTasks.pcall(function()
-                        return collection:getPublishedPhotos()
-                    end)
-                    if not okPublished then
-                        firstError = firstError or ("published photos: " .. tostring(publishedPhotos))
-                    elseif publishedPhotos then
-                        local last = #publishedPhotos
-                        for i, publishedPhoto in ipairs(publishedPhotos) do
-                            if progressScope and progressScope:isCanceled() then
-                                break
-                            end
-                            local okRemote, remoteId = LrTasks.pcall(function()
-                                return publishedPhoto:getRemoteId()
-                            end)
-                            local okPhoto, photo = LrTasks.pcall(function()
-                                return publishedPhoto:getPhoto()
-                            end)
-                            if okRemote and okPhoto then
-                                addKnownAssetId(byPhoto, photo, remoteId)
-                            else
-                                firstError = firstError or "published photo record"
-                            end
-                            if progressScope and (i % 100 == 0 or i == last) then
-                                progressScope:setCaption(
-                                    string.format(
-                                        "Caching published asset IDs: %s (%d / %d)...",
-                                        collectionName,
-                                        i,
-                                        last
+                    if not needsPublishedWalk then
+                        log:trace(
+                            "collectKnownAssetIds: metadata covers published collection '" .. collectionName .. "'"
+                        )
+                    else
+                        local okPublished, publishedPhotos = LrTasks.pcall(function()
+                            return collection:getPublishedPhotos()
+                        end)
+                        if not okPublished then
+                            firstError = firstError or ("published photos: " .. tostring(publishedPhotos))
+                        elseif publishedPhotos then
+                            local last = #publishedPhotos
+                            for i, publishedPhoto in ipairs(publishedPhotos) do
+                                if progressScope and progressScope:isCanceled() then
+                                    break
+                                end
+                                local okRemote, remoteId = LrTasks.pcall(function()
+                                    return publishedPhoto:getRemoteId()
+                                end)
+                                local okPhoto, photo = LrTasks.pcall(function()
+                                    return publishedPhoto:getPhoto()
+                                end)
+                                if okRemote and okPhoto then
+                                    addKnownAssetId(byPhoto, photo, remoteId)
+                                else
+                                    firstError = firstError or "published photo record"
+                                end
+                                if progressScope and (i % 100 == 0 or i == last) then
+                                    progressScope:setCaption(
+                                        string.format(
+                                            "Caching published asset IDs: %s (%d / %d)...",
+                                            collectionName,
+                                            i,
+                                            last
+                                        )
                                     )
-                                )
+                                end
                             end
                         end
                     end
