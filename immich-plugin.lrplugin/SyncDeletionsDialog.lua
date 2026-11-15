@@ -157,6 +157,14 @@ local function collectKnownAssetIds(catalog, progressScope, options)
                         return collection:isSmartCollection()
                     end)
                     isSmart = okSmart and smart == true
+                    if not isSmart then
+                        -- Some published smart collections report false here; the
+                        -- search description is only available for smart collections.
+                        local okSearch, searchDesc = LrTasks.pcall(function()
+                            return collection:getSearchDescription()
+                        end)
+                        isSmart = okSearch and type(searchDesc) == "table"
+                    end
                 end
 
                 if isSmart then
