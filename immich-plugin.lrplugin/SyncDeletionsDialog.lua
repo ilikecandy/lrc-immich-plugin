@@ -74,21 +74,45 @@ end
 local function collectKnownAssetIds(catalog, progressScope)
     local byPhoto = {}
     local firstError = nil
-    local allPhotos = catalog:getAllPhotos() or {}
-    for i, photo in ipairs(allPhotos) do
-        local ok, assetId = LrTasks.pcall(function()
-            return photo:getPropertyForPlugin(_PLUGIN, "immichAssetId")
-        end)
-        if ok then
-            addKnownAssetId(byPhoto, photo, assetId)
-        else
-            firstError = firstError or ("photo metadata: " .. tostring(assetId))
-        end
-        if progressScope and (i % 1000 == 0 or i == #allPhotos) then
-            progressScope:setCaption(string.format("Caching local asset IDs: %d / %d...", i, #allPhotos))
-        end
+
+    -- Query the catalog for photos that actually have the plugin field. This is
+    -- one indexed lookup; calling photo:getPropertyForPlugin() for every photo in
+    -- a 60k catalog takes hours. Read the values in batches, then continue.
+    local okFind, photosWithId = LrTasks.pcall(function()
+        -- The field was created without an explicit version; Lightroom records it
+        -- as version 0.0, so pass 0 to include those photos.
+        return catalog:findPhotosWithProperty(_PLUGIN.id, "immichAssetId", 0) or {}
+    end)
+    if not okFind then
+        return byPhoto, "photo metadata: " .. tostring(photosWithId)
+    end
+
+    local total = #photosWithId
+    local chunkSize = 1000
+    for first = 1, total, chunkSize do
         if progressScope and progressScope:isCanceled() then
-            break
+            return byPhoto, nil
+        end
+        local last = math.min(first + chunkSize - 1, total)
+        local chunk = {}
+        for i = first, last do
+            chunk[#chunk + 1] = photosWithId[i]
+        end
+
+        local okBatch, values = LrTasks.pcall(function()
+            return catalog:batchGetPropertyForPlugin(chunk, _PLUGIN, { "immichAssetId" })
+        end)
+        if not okBatch then
+            firstError = firstError or ("photo metadata: " .. tostring(values))
+        elseif values then
+            for _, photo in ipairs(chunk) do
+                local entry = values[photo]
+                addKnownAssetId(byPhoto, photo, entry and entry.immichAssetId)
+            end
+        end
+
+        if progressScope then
+            progressScope:setCaption(string.format("Caching local asset IDs: %d / %d...", last, total))
         end
     end
 
