@@ -45,3 +45,6 @@ end
 if _G.prefs.importPath == nil then
     _G.prefs.importPath = LrPathUtils.child(LrPathUtils.getStandardFilePath("pictures"), "Immich Import")
 end
+if _G.prefs.repairPublishedOnly == nil then
+    _G.prefs.repairPublishedOnly = false
+end

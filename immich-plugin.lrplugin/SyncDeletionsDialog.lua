@@ -71,9 +71,12 @@ end
 -- The metadata field holds a single ID per photo and cannot represent the
 -- per-service assets Publish now keeps (see PublishTask), so both sources are
 -- needed: an asset recorded only by a publish collection is not an orphan.
-local function collectKnownAssetIds(catalog, progressScope)
+local function collectKnownAssetIds(catalog, progressScope, options)
     local byPhoto = {}
     local firstError = nil
+    -- Published-only collections are slow to walk. The date repair skips them by
+    -- default (metadata covers the normal case); the deletion scans include them.
+    local includePublishedOnly = not options or options.includePublishedOnly ~= false
 
     -- Query the catalog for photos that actually have the plugin field. This is
     -- one indexed lookup; calling photo:getPropertyForPlugin() for every photo in
@@ -185,6 +188,12 @@ local function collectKnownAssetIds(catalog, progressScope)
                     if not needsPublishedWalk then
                         log:trace(
                             "collectKnownAssetIds: metadata covers published collection '" .. collectionName .. "'"
+                        )
+                    elseif not includePublishedOnly then
+                        log:trace(
+                            "collectKnownAssetIds: published-only collection skipped '"
+                                .. collectionName
+                                .. "' (enable 'Also check published-only assets')"
                         )
                     else
                         local okPublished, publishedPhotos = LrTasks.pcall(function()
@@ -671,7 +680,9 @@ runDateRepairScan = function()
         end
 
         progressScope:setCaption("Caching known asset IDs...")
-        local byPhoto, collectError = collectKnownAssetIds(catalog, progressScope)
+        local byPhoto, collectError = collectKnownAssetIds(catalog, progressScope, {
+            includePublishedOnly = prefs.repairPublishedOnly == true,
+        })
         if collectError then
             progressScope:done()
             LrDialogs.message(
@@ -1051,6 +1062,10 @@ return {
                         font = "<system/small>",
                         width = 560,
                         fill_horizontal = 1,
+                    }),
+                    f:checkbox({
+                        title = "Also check published-only assets (slower)",
+                        value = LrView.bind("repairPublishedOnly"),
                     }),
                     f:row({
                         margin_top = 10,
