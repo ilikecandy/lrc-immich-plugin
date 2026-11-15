@@ -158,6 +158,9 @@ local function collectKnownAssetIds(catalog, progressScope)
                 if isDefault then
                     log:trace("collectKnownAssetIds: skipping default published collection '" .. collectionName .. "'")
                 else
+                    if progressScope then
+                        progressScope:setCaption("Checking published collection: " .. collectionName .. "...")
+                    end
                     -- With one publish service, Publish writes the asset ID into the
                     -- photo metadata. If every photo in this collection already has
                     -- one, the published records would only repeat it; skip the
